@@ -1,0 +1,12 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+compile_commands.json
+
+.DS_Store
+*.swp
+
+# Reference renders and measurement scratch output
+*.wav
+!test/fixtures/**/*.wav

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "sampleRate": 48000.0,
+  "fftSize": 16384,
+  "toneBin": 1365,
+  "toneHz": 3999.0234,
+  "amplitude": 4.00,
+  "minImprovementDb": 5.00,
+  "curves": {
+    "tanh": { "adaaNmrDb": -31.492, "naiveNmrDb": -24.655, "improvementDb": 6.837 },
+    "tube": { "adaaNmrDb": -30.856, "naiveNmrDb": -23.707, "improvementDb": 7.149 },
+    "transformer": { "adaaNmrDb": -30.705, "naiveNmrDb": -23.036, "improvementDb": 7.669 },
+    "wavefolder": { "adaaNmrDb": -9.800, "naiveNmrDb": -1.177, "improvementDb": 8.624 }
+  }
+}
