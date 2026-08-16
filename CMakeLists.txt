@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(AgeOfDistortion VERSION 0.1.0 LANGUAGES CXX)
+# C is required by JUCE module sources on macOS even though none of our own code
+# uses it; without it the generate step fails on CMAKE_C_COMPILE_OBJECT.
+project(AgeOfDistortion VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,24 +12,43 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
-option(X10_BUILD_TESTS   "Build x10_dsp unit tests"                ON)
-option(X10_BUILD_PLUGINS "Build JUCE plugin targets (M0 and later)" OFF)
-option(X10_SANITIZE      "Enable ASan + UBSan on x10 targets"       OFF)
+option(X10_BUILD_TESTS   "Build unit tests"                          ON)
+option(X10_BUILD_PLUGINS "Build the JUCE plugin targets (M0 onward)" OFF)
+option(X10_SANITIZE      "Enable ASan + UBSan on x10 targets"        OFF)
 
-# JUCE is not fetched yet — no plugin target exists before M0. The version is
-# pinned here so that M0 inherits it instead of re-deciding. See plan D1:
-# x10_dsp itself must never depend on JUCE.
-set(X10_JUCE_TAG "8.0.14" CACHE STRING "JUCE version pin for plugin targets (M0+)")
+# x10_dsp itself must never depend on JUCE (plan D1). JUCE is fetched only when
+# a plugin target is actually being built, which keeps the DSP test cycle at
+# under a second and keeps the licence boundary obvious.
+set(X10_JUCE_TAG "8.0.14" CACHE STRING "JUCE version pin for plugin targets")
 
-if(X10_BUILD_PLUGINS)
-    message(FATAL_ERROR
-        "X10_BUILD_PLUGINS is reserved for M0. No plugin target exists yet; "
-        "JUCE ${X10_JUCE_TAG} will be fetched when one is added.")
-endif()
+enable_testing()
 
 add_subdirectory(libs/x10_dsp)
 
 if(X10_BUILD_TESTS)
-    enable_testing()
+    include(FetchContent)
+    FetchContent_Declare(Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v3.7.1
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(Catch2)
+
+    # Fetched at top level so that CMAKE_MODULE_PATH and the Catch module reach
+    # every test directory. Declaring them inside one test subdirectory leaves
+    # sibling directories without catch_discover_tests.
+    list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+    include(Catch)
+
     add_subdirectory(libs/x10_dsp/test)
+endif()
+
+if(X10_BUILD_PLUGINS)
+    include(FetchContent)
+    FetchContent_Declare(JUCE
+        GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+        GIT_TAG        ${X10_JUCE_TAG}
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(JUCE)
+
+    add_subdirectory(plugins/rompler)
 endif()

@@ -22,11 +22,23 @@
         "X10_BUILD_TESTS": "ON",
         "X10_SANITIZE": "ON"
       }
+    },
+    {
+      "name": "plugin",
+      "displayName": "Plugin (RelWithDebInfo, Ninja, fetches JUCE)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-plugin",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "X10_BUILD_TESTS": "ON",
+        "X10_BUILD_PLUGINS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "asan", "configurePreset": "asan" }
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "plugin", "configurePreset": "plugin" }
   ],
   "testPresets": [
     {
@@ -37,6 +49,11 @@
     {
       "name": "asan",
       "configurePreset": "asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "plugin",
+      "configurePreset": "plugin",
       "output": { "outputOnFailure": true }
     }
   ]
