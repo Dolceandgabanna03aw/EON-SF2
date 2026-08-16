@@ -4,21 +4,22 @@
 #include <string>
 #include <vector>
 
-#include "x10/instrument/Region.h"
+#include "x10/instrument/Preset.h"
 #include "x10/sf2/Sf2Reader.h"
 
 namespace x10::sf2
 {
 
-/** One playable preset, already resolved down to flat regions. */
-struct FlatPreset
-{
-    std::string   name;
-    std::uint16_t bank    = 0;
-    std::uint16_t program = 0;
+/**
+    One playable preset, already resolved down to flat regions.
 
-    std::vector<instrument::Region> regions;
-};
+    This is exactly x10::instrument::Preset. The alias exists so flatten()'s
+    return type reads as an SF2 concept at the call site, while the type itself
+    stays owned by the format-neutral instrument library — RegionIndex accepts
+    a plain std::vector<instrument::Preset> and has no idea SF2 exists
+    (planning document, issue A).
+*/
+using FlatPreset = instrument::Preset;
 
 /** Counts of things that were skipped, so a quiet bank can be explained. */
 struct FlattenDiagnostics

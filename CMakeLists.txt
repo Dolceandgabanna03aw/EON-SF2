@@ -43,6 +43,7 @@ if(X10_BUILD_TESTS)
     include(Catch)
 
     add_subdirectory(libs/x10_dsp/test)
+    add_subdirectory(libs/instrument/test)
     add_subdirectory(libs/sf2/test)
 endif()
 
