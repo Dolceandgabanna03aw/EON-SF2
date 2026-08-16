@@ -24,6 +24,7 @@ set(X10_JUCE_TAG "8.0.14" CACHE STRING "JUCE version pin for plugin targets")
 enable_testing()
 
 add_subdirectory(libs/x10_dsp)
+add_subdirectory(libs/instrument)
 add_subdirectory(libs/sf2)
 add_subdirectory(tools/sf2_crosscheck)
 

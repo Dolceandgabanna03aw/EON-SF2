@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "x10/sf2/Sf2Types.h"
@@ -97,9 +98,58 @@ private:
     return makeChunk ("LIST", inner.bytes());
 }
 
+/** A generator as it appears on disk: operator plus a raw 16-bit amount. */
+using GeneratorPair = std::pair<std::uint16_t, std::uint16_t>;
+
+/** Packs a key or velocity range into the byte-pair amount the format uses. */
+[[nodiscard]] inline std::uint16_t rangeAmount (std::uint8_t low, std::uint8_t high) noexcept
+{
+    return static_cast<std::uint16_t> (static_cast<unsigned> (low)
+                                       | (static_cast<unsigned> (high) << 8));
+}
+
+/** Reinterprets a signed amount the way the format stores it. */
+[[nodiscard]] inline std::uint16_t signedAmount (std::int16_t value) noexcept
+{
+    return static_cast<std::uint16_t> (value);
+}
+
+struct BuilderZone
+{
+    std::vector<GeneratorPair> generators;
+};
+
+struct BuilderPreset
+{
+    std::string   name    = "Preset";
+    std::uint16_t bank    = 0;
+    std::uint16_t program = 0;
+    std::vector<BuilderZone> zones;
+};
+
+struct BuilderInstrument
+{
+    std::string name = "Instrument";
+    std::vector<BuilderZone> zones;
+};
+
+struct BuilderSample
+{
+    std::string   name            = "Sample";
+    std::uint32_t start           = 0;
+    std::uint32_t end             = 64;
+    std::uint32_t loopStart       = 8;
+    std::uint32_t loopEnd         = 56;
+    std::uint32_t sampleRate      = 44100;
+    std::uint8_t  originalPitch   = 60;
+    std::int8_t   pitchCorrection = 0;
+    std::uint16_t sampleLink      = 0;
+    std::uint16_t sampleType      = sampleTypeMono;
+};
+
 /**
-    A minimal but genuinely valid bank: one preset -> one instrument -> one
-    sample, with every mandatory terminal record present.
+    Builds a bank from an explicit hierarchy, or a minimal valid default when
+    none is given: one preset -> one instrument -> one sample.
 
     Each knob breaks exactly one property so a failing test names the defect.
 */
@@ -127,16 +177,18 @@ struct Sf2Builder
     /// Emits an odd-length ICMT before INAM, so the reader must honour the pad byte.
     bool oddLengthInfoChunk = false;
 
+    /// Left empty for the default single-chain bank.
+    std::vector<BuilderPreset>    presets;
+    std::vector<BuilderInstrument> instruments;
+    std::vector<BuilderSample>     samples;
+
     [[nodiscard]] std::vector<std::byte> build() const
     {
         std::vector<std::vector<std::byte>> topLevel;
 
-        if (includeInfoList)
-            topLevel.push_back (buildInfo());
-        if (includeSdtaList)
-            topLevel.push_back (buildSdta());
-        if (includePdtaList)
-            topLevel.push_back (buildPdta());
+        if (includeInfoList) topLevel.push_back (buildInfo());
+        if (includeSdtaList) topLevel.push_back (buildSdta());
+        if (includePdtaList) topLevel.push_back (buildPdta());
 
         ByteWriter body;
         body.id ("sfbk");
@@ -151,6 +203,41 @@ struct Sf2Builder
     }
 
 private:
+    [[nodiscard]] std::vector<BuilderPreset> effectivePresets() const
+    {
+        if (! presets.empty())
+            return presets;
+
+        BuilderPreset preset;
+        preset.name = "Test Preset";
+        preset.zones.push_back (BuilderZone { { { 41, 0 } } }); // instrument -> 0
+        return { preset };
+    }
+
+    [[nodiscard]] std::vector<BuilderInstrument> effectiveInstruments() const
+    {
+        if (! instruments.empty())
+            return instruments;
+
+        BuilderInstrument inst;
+        inst.name = "Test Instrument";
+        inst.zones.push_back (BuilderZone { { { 53, 0 } } }); // sampleID -> 0
+        return { inst };
+    }
+
+    [[nodiscard]] std::vector<BuilderSample> effectiveSamples() const
+    {
+        if (! samples.empty())
+            return samples;
+
+        BuilderSample sample;
+        sample.name    = "Test Sample";
+        sample.end     = static_cast<std::uint32_t> (sampleFrames);
+        sample.loopEnd = sampleFrames > 8 ? static_cast<std::uint32_t> (sampleFrames - 8)
+                                          : static_cast<std::uint32_t> (sampleFrames);
+        return { sample };
+    }
+
     [[nodiscard]] std::vector<std::byte> buildInfo() const
     {
         std::vector<std::vector<std::byte>> chunks;
@@ -170,7 +257,7 @@ private:
         if (oddLengthInfoChunk)
         {
             ByteWriter w;
-            w.zstr ("odd"); // 4 bytes with the NUL... make it genuinely odd
+            w.zstr ("odd");
             w.u8 (static_cast<std::uint8_t> ('x'));
             chunks.push_back (makeChunk ("ICMT", w.bytes()));
         }
@@ -214,8 +301,8 @@ private:
         return makeList ("sdta", chunks);
     }
 
-    [[nodiscard]] std::vector<std::byte> appendTable (std::string_view fourCC,
-                                                      const std::vector<std::byte>& payload) const
+    [[nodiscard]] std::vector<std::byte> emitTable (std::string_view fourCC,
+                                                    const std::vector<std::byte>& payload) const
     {
         if (! emptyPdtaChunk.empty() && emptyPdtaChunk == fourCC)
             return makeChunk (fourCC, {});
@@ -232,78 +319,121 @@ private:
 
     [[nodiscard]] std::vector<std::byte> buildPdta() const
     {
+        const auto presetList     = effectivePresets();
+        const auto instrumentList = effectiveInstruments();
+        const auto sampleList     = effectiveSamples();
+
         std::vector<std::vector<std::byte>> chunks;
 
         auto emit = [&] (std::string_view fourCC, const std::vector<std::byte>& payload)
         {
             if (! omitPdtaChunk.empty() && omitPdtaChunk == fourCC)
                 return;
-            chunks.push_back (appendTable (fourCC, payload));
+            chunks.push_back (emitTable (fourCC, payload));
         };
 
-        {   // phdr: one preset plus the terminal EOP
-            ByteWriter w;
-            w.name20 ("Test Preset"); w.u16 (0); w.u16 (0); w.u16 (0); w.u32 (0); w.u32 (0); w.u32 (0);
-            w.name20 ("EOP");         w.u16 (0); w.u16 (0); w.u16 (1); w.u32 (0); w.u32 (0); w.u32 (0);
-            emit ("phdr", w.bytes());
-        }
-        {   // pbag: one zone plus terminal
-            ByteWriter w;
-            w.u16 (0); w.u16 (0);
-            w.u16 (1); w.u16 (0);
-            emit ("pbag", w.bytes());
-        }
-        {   // pmod: terminal only
-            ByteWriter w;
-            w.u16 (0); w.u16 (0); w.s16 (0); w.u16 (0); w.u16 (0);
-            emit ("pmod", w.bytes());
-        }
-        {   // pgen: instrument generator (41) plus terminal
-            ByteWriter w;
-            w.u16 (41); w.u16 (0);
-            w.u16 (0);  w.u16 (0);
-            emit ("pgen", w.bytes());
-        }
-        {   // inst: one instrument plus terminal EOI
-            ByteWriter w;
-            w.name20 ("Test Instrument"); w.u16 (0);
-            w.name20 ("EOI");             w.u16 (1);
-            emit ("inst", w.bytes());
-        }
-        {   // ibag
-            ByteWriter w;
-            w.u16 (0); w.u16 (0);
-            w.u16 (1); w.u16 (0);
-            emit ("ibag", w.bytes());
-        }
-        {   // imod: terminal only
-            ByteWriter w;
-            w.u16 (0); w.u16 (0); w.s16 (0); w.u16 (0); w.u16 (0);
-            emit ("imod", w.bytes());
-        }
-        {   // igen: sampleID generator (53) plus terminal
-            ByteWriter w;
-            w.u16 (53); w.u16 (0);
-            w.u16 (0);  w.u16 (0);
-            emit ("igen", w.bytes());
-        }
-        {   // shdr: one sample plus terminal EOS
-            ByteWriter w;
-            const auto end = static_cast<std::uint32_t> (sampleFrames);
-            w.name20 ("Test Sample");
-            w.u32 (0); w.u32 (end); w.u32 (8); w.u32 (end > 8 ? end - 8 : end);
-            w.u32 (44100);
-            w.u8 (60); w.u8 (0);
-            w.u16 (0); w.u16 (sampleTypeMono);
+        // ---- preset side ----
+        ByteWriter phdr, pbag, pgen;
+        std::uint16_t presetZoneCursor = 0;
+        std::uint16_t presetGenCursor  = 0;
 
-            w.name20 ("EOS");
-            w.u32 (0); w.u32 (0); w.u32 (0); w.u32 (0);
-            w.u32 (0);
-            w.u8 (0); w.u8 (0);
-            w.u16 (0); w.u16 (0);
+        for (const auto& preset : presetList)
+        {
+            phdr.name20 (preset.name);
+            phdr.u16 (preset.program);
+            phdr.u16 (preset.bank);
+            phdr.u16 (presetZoneCursor);
+            phdr.u32 (0); phdr.u32 (0); phdr.u32 (0);
 
-            emit ("shdr", w.bytes());
+            for (const auto& zone : preset.zones)
+            {
+                pbag.u16 (presetGenCursor);
+                pbag.u16 (0); // modulators are out of scope (ADR-09)
+
+                for (const auto& generator : zone.generators)
+                {
+                    pgen.u16 (generator.first);
+                    pgen.u16 (generator.second);
+                    ++presetGenCursor;
+                }
+
+                ++presetZoneCursor;
+            }
         }
+
+        phdr.name20 ("EOP");
+        phdr.u16 (0); phdr.u16 (0); phdr.u16 (presetZoneCursor);
+        phdr.u32 (0); phdr.u32 (0); phdr.u32 (0);
+
+        pbag.u16 (presetGenCursor); pbag.u16 (0); // terminal bag
+        pgen.u16 (0); pgen.u16 (0);               // terminal generator
+
+        // ---- instrument side ----
+        ByteWriter inst, ibag, igen;
+        std::uint16_t instrumentZoneCursor = 0;
+        std::uint16_t instrumentGenCursor  = 0;
+
+        for (const auto& instrument : instrumentList)
+        {
+            inst.name20 (instrument.name);
+            inst.u16 (instrumentZoneCursor);
+
+            for (const auto& zone : instrument.zones)
+            {
+                ibag.u16 (instrumentGenCursor);
+                ibag.u16 (0);
+
+                for (const auto& generator : zone.generators)
+                {
+                    igen.u16 (generator.first);
+                    igen.u16 (generator.second);
+                    ++instrumentGenCursor;
+                }
+
+                ++instrumentZoneCursor;
+            }
+        }
+
+        inst.name20 ("EOI");
+        inst.u16 (instrumentZoneCursor);
+
+        ibag.u16 (instrumentGenCursor); ibag.u16 (0);
+        igen.u16 (0); igen.u16 (0);
+
+        // ---- samples ----
+        ByteWriter shdr;
+        for (const auto& sample : sampleList)
+        {
+            shdr.name20 (sample.name);
+            shdr.u32 (sample.start);
+            shdr.u32 (sample.end);
+            shdr.u32 (sample.loopStart);
+            shdr.u32 (sample.loopEnd);
+            shdr.u32 (sample.sampleRate);
+            shdr.u8 (sample.originalPitch);
+            shdr.u8 (static_cast<std::uint8_t> (sample.pitchCorrection));
+            shdr.u16 (sample.sampleLink);
+            shdr.u16 (sample.sampleType);
+        }
+
+        shdr.name20 ("EOS");
+        shdr.u32 (0); shdr.u32 (0); shdr.u32 (0); shdr.u32 (0); shdr.u32 (0);
+        shdr.u8 (0); shdr.u8 (0); shdr.u16 (0); shdr.u16 (0);
+
+        ByteWriter terminalModulator;
+        terminalModulator.u16 (0); terminalModulator.u16 (0);
+        terminalModulator.s16 (0);
+        terminalModulator.u16 (0); terminalModulator.u16 (0);
+
+        emit ("phdr", phdr.bytes());
+        emit ("pbag", pbag.bytes());
+        emit ("pmod", terminalModulator.bytes());
+        emit ("pgen", pgen.bytes());
+        emit ("inst", inst.bytes());
+        emit ("ibag", ibag.bytes());
+        emit ("imod", terminalModulator.bytes());
+        emit ("igen", igen.bytes());
+        emit ("shdr", shdr.bytes());
 
         return makeList ("pdta", chunks);
     }

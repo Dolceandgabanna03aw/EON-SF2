@@ -1,4 +1,6 @@
-add_executable(x10_sf2_tests test_sf2_reader.cpp)
+add_executable(x10_sf2_tests
+    test_sf2_reader.cpp
+    test_sf2_flattener.cpp)
 
 target_link_libraries(x10_sf2_tests PRIVATE
     x10::sf2
