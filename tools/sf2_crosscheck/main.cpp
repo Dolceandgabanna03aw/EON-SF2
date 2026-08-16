@@ -22,6 +22,7 @@
 
 #include <fluidsynth.h>
 
+#include "x10/sf2/Sf2Flattener.h"
 #include "x10/sf2/Sf2Reader.h"
 
 namespace
@@ -111,6 +112,51 @@ bool collectFromX10 (const std::string& path, std::vector<PresetEntry>& out, x10
     return true;
 }
 
+/**
+    Runs the flattener and reports what it found.
+
+    This is checked separately from the preset-table comparison above because
+    it is not cross-validated against FluidSynth — FluidSynth's preset
+    iteration doesn't expose per-region data through the public API in a form
+    worth reimplementing here. What this catches instead: a real bank is the
+    first input the flattener has ever seen that it didn't generate itself,
+    so a nonzero diagnostics count on a bank that plays fine elsewhere means
+    the flattener is dropping something a real editor considered valid.
+*/
+void reportFlattening (const std::string& path)
+{
+    std::vector<std::byte> bytes;
+    x10::sf2::RawBank bank;
+
+    if (x10::sf2::readFile (path, bytes, bank) != x10::sf2::Sf2Error::ok)
+        return; // already reported by the preset-table comparison
+
+    x10::sf2::FlattenDiagnostics diagnostics;
+    const auto presets = x10::sf2::flatten (bank, diagnostics);
+
+    std::size_t totalRegions = 0;
+    for (const auto& preset : presets)
+        totalRegions += preset.regions.size();
+
+    std::printf ("  flatten          : %zu preset(s), %zu region(s) total\n",
+                 presets.size(), totalRegions);
+
+    if (diagnostics.total() > 0)
+    {
+        std::printf ("    dropped: zonesWithoutInstrument=%zu zonesWithoutSample=%zu "
+                    "badInstrumentIndex=%zu badSampleIndex=%zu romSamplesSkipped=%zu "
+                    "emptyKeyRange=%zu badBagRange=%zu\n",
+                    diagnostics.zonesWithoutInstrument, diagnostics.zonesWithoutSample,
+                    diagnostics.badInstrumentIndex, diagnostics.badSampleIndex,
+                    diagnostics.romSamplesSkipped, diagnostics.emptyKeyRange,
+                    diagnostics.badBagRange);
+    }
+
+    for (const auto& preset : presets)
+        std::printf ("    %3u:%-3u %-32s %3zu region(s)\n",
+                     preset.bank, preset.program, trimmed (preset.name).c_str(), preset.regions.size());
+}
+
 int compare (const std::string& path)
 {
     std::vector<PresetEntry> theirs, ours;
@@ -139,31 +185,35 @@ int compare (const std::string& path)
     std::sort (theirs.begin(), theirs.end());
     std::sort (ours.begin(), ours.end());
 
+    int result = 0;
+
     if (theirs == ours)
-    {
         std::printf ("  match  %3zu preset(s) : %s\n", ours.size(), path.c_str());
-        return 0;
-    }
-
-    std::printf ("  DISAGREE on presets: %s  fluidsynth=%zu  x10=%zu\n",
-                 path.c_str(), theirs.size(), ours.size());
-
-    const std::size_t limit = std::min<std::size_t> (8, std::max (theirs.size(), ours.size()));
-    for (std::size_t i = 0; i < limit; ++i)
+    else
     {
-        const auto describe = [] (const std::vector<PresetEntry>& list, std::size_t index)
-        {
-            if (index >= list.size())
-                return std::string { "-" };
-            const auto& e = list[index];
-            return std::to_string (e.bank) + ":" + std::to_string (e.program) + " " + e.name;
-        };
+        std::printf ("  DISAGREE on presets: %s  fluidsynth=%zu  x10=%zu\n",
+                     path.c_str(), theirs.size(), ours.size());
 
-        std::printf ("    [%zu] fluidsynth=%-32s x10=%s\n",
-                     i, describe (theirs, i).c_str(), describe (ours, i).c_str());
+        const std::size_t limit = std::min<std::size_t> (8, std::max (theirs.size(), ours.size()));
+        for (std::size_t i = 0; i < limit; ++i)
+        {
+            const auto describe = [] (const std::vector<PresetEntry>& list, std::size_t index)
+            {
+                if (index >= list.size())
+                    return std::string { "-" };
+                const auto& e = list[index];
+                return std::to_string (e.bank) + ":" + std::to_string (e.program) + " " + e.name;
+            };
+
+            std::printf ("    [%zu] fluidsynth=%-32s x10=%s\n",
+                         i, describe (theirs, i).c_str(), describe (ours, i).c_str());
+        }
+
+        result = 1;
     }
 
-    return 1;
+    reportFlattening (path);
+    return result;
 }
 
 } // namespace
