@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 
 namespace aod
 {
@@ -39,7 +40,8 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     buffer.clear();
 
-    if (!voicePool_ || !sf2Loader_)
+    SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
+    if (!voicePool_ || loader == nullptr)
         return;
 
     float* outL = buffer.getWritePointer(0);
@@ -53,7 +55,9 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         {
             const int note = msg.getNoteNumber();
             const int velocity = msg.getVelocity();
-            Sample* sample = sf2Loader_->getSample(currentBank_, currentProgram_, note, velocity);
+            const int bank = currentBank_.load (std::memory_order_relaxed);
+            const int program = currentProgram_.load (std::memory_order_relaxed);
+            Sample* sample = loader->getSample(bank, program, note, velocity);
 
             if (sample != nullptr)
                 voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
@@ -65,7 +69,7 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         }
         else if (msg.isProgramChange())
         {
-            currentProgram_ = msg.getProgramChangeNumber();
+            currentProgram_.store (msg.getProgramChangeNumber(), std::memory_order_relaxed);
         }
     }
 
@@ -86,7 +90,7 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
 juce::AudioProcessorEditor* RomplerProcessor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor (*this);
+    return new RomplerEditor (*this);
 }
 
 void RomplerProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -104,13 +108,44 @@ void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
 
 void RomplerProcessor::loadSoundFont(const juce::File& file)
 {
-    sf2Loader_ = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
-    if (sf2Loader_->loadFile(file))
-    {
-        const auto [bank, program] = sf2Loader_->firstPresetProgram();
-        currentBank_ = bank;
-        currentProgram_ = program;
-    }
+    auto newLoader = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
+    if (!newLoader->loadFile(file))
+        return;
+
+    const auto [bank, program] = newLoader->firstPresetProgram();
+    currentBank_.store (bank, std::memory_order_relaxed);
+    currentProgram_.store (program, std::memory_order_relaxed);
+    loadedFileName_ = file.getFileName();
+
+    // Publish the new loader before retiring the old one: a note-on on the
+    // audio thread that reads activeLoader_ right now must see either the
+    // fully-built new loader or the still-valid old one, never a half state.
+    activeLoader_.store (newLoader.get(), std::memory_order_release);
+
+    if (sf2Loader_)
+        retiredLoaders_.push_back (std::move (sf2Loader_));
+    sf2Loader_ = std::move (newLoader);
+}
+
+int RomplerProcessor::getPresetCount() const noexcept
+{
+    return sf2Loader_ ? sf2Loader_->presetCount() : 0;
+}
+
+juce::String RomplerProcessor::getPresetName (int presetIndex) const noexcept
+{
+    return sf2Loader_ ? sf2Loader_->presetName (presetIndex) : juce::String {};
+}
+
+std::pair<int, int> RomplerProcessor::getPresetBankProgram (int presetIndex) const noexcept
+{
+    return sf2Loader_ ? sf2Loader_->presetBankProgram (presetIndex) : std::pair<int, int> { 0, 0 };
+}
+
+void RomplerProcessor::selectPreset (int bank, int program) noexcept
+{
+    currentBank_.store (bank, std::memory_order_relaxed);
+    currentProgram_.store (program, std::memory_order_relaxed);
 }
 
 } // namespace aod

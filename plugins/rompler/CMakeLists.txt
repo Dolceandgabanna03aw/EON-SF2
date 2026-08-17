@@ -17,6 +17,7 @@ juce_add_plugin(AgeOfDistortion
 
 target_sources(AgeOfDistortion PRIVATE
     Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
     Source/Sampler.cpp
     Source/SF2Loader.cpp)
 target_include_directories(AgeOfDistortion PRIVATE Source)

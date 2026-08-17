@@ -26,6 +26,10 @@ public:
     /** (bank, program) of preset 0 in load order, or {0, 0} if nothing loaded. */
     [[nodiscard]] std::pair<int, int> firstPresetProgram() const noexcept;
 
+    [[nodiscard]] int presetCount() const noexcept;
+    [[nodiscard]] juce::String presetName (int presetIndex) const noexcept;
+    [[nodiscard]] std::pair<int, int> presetBankProgram (int presetIndex) const noexcept;
+
 private:
     int hostSampleRate_;
     std::unique_ptr<x10::instrument::RegionIndex> regionIndex_;

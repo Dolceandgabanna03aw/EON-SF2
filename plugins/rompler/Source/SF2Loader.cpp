@@ -95,6 +95,28 @@ std::pair<int, int> SF2Loader::firstPresetProgram() const noexcept
     return { preset.bank, preset.program };
 }
 
+int SF2Loader::presetCount() const noexcept
+{
+    return regionIndex_ ? static_cast<int>(regionIndex_->presetCount()) : 0;
+}
+
+juce::String SF2Loader::presetName(int presetIndex) const noexcept
+{
+    if (!regionIndex_ || presetIndex < 0 || presetIndex >= presetCount())
+        return {};
+
+    return regionIndex_->presetAt(static_cast<std::size_t>(presetIndex)).name;
+}
+
+std::pair<int, int> SF2Loader::presetBankProgram(int presetIndex) const noexcept
+{
+    if (!regionIndex_ || presetIndex < 0 || presetIndex >= presetCount())
+        return { 0, 0 };
+
+    const auto& preset = regionIndex_->presetAt(static_cast<std::size_t>(presetIndex));
+    return { preset.bank, preset.program };
+}
+
 void SF2Loader::resampleToHostRate(Sample& sample)
 {
     if (sample.sampleRate == hostSampleRate_ || sample.data.empty())
