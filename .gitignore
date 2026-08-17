@@ -10,3 +10,5 @@ compile_commands.json
 # Reference renders and measurement scratch output
 *.wav
 !test/fixtures/**/*.wav
+# Large local SoundFont test collection (~1.9 GB, untracked)
+testdata/
