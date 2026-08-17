@@ -15,7 +15,10 @@ juce_add_plugin(AgeOfDistortion
     AU_MAIN_TYPE                kAudioUnitType_MusicDevice
     AU_SANDBOX_SAFE             TRUE)
 
-target_sources(AgeOfDistortion PRIVATE Source/PluginProcessor.cpp)
+target_sources(AgeOfDistortion PRIVATE
+    Source/PluginProcessor.cpp
+    Source/Sampler.cpp
+    Source/SF2Loader.cpp)
 target_include_directories(AgeOfDistortion PRIVATE Source)
 
 target_compile_definitions(AgeOfDistortion PUBLIC
@@ -31,6 +34,8 @@ target_compile_definitions(AgeOfDistortion PUBLIC
 target_link_libraries(AgeOfDistortion
     PRIVATE
         x10::dsp
+        x10::sf2
+        x10::instrument
         juce::juce_audio_utils
     PUBLIC
         juce::juce_recommended_config_flags

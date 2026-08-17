@@ -3,19 +3,12 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "Parameters.h"
+#include "Sampler.h"
+#include "SF2Loader.h"
 
 namespace aod
 {
 
-/**
-    M0 skeleton: a synth that loads, exposes its parameters, restores its state
-    and outputs silence.
-
-    The point of the milestone is the plumbing, not the sound. Everything that
-    is hard to retrofit — bus layout negotiation, state round-tripping, latency
-    reporting, real-time safety in processBlock — is settled here, while it is
-    still cheap to verify, and pluginval at strictness 10 is the gate.
-*/
 class RomplerProcessor final : public juce::AudioProcessor
 {
 public:
@@ -25,9 +18,6 @@ public:
     void prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock) override;
     void releaseResources() override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
-    // Double precision is deliberately not advertised: x10_dsp is float-only, so
-    // claiming support would mean converting at the boundary and measuring a
-    // precision the engine does not actually have.
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -51,8 +41,15 @@ public:
 
     [[nodiscard]] juce::AudioProcessorValueTreeState& getValueTreeState() noexcept { return apvts_; }
 
+    void loadSoundFont(const juce::File& file);
+
 private:
     juce::AudioProcessorValueTreeState apvts_;
+    std::unique_ptr<SF2Loader> sf2Loader_;
+    std::unique_ptr<VoicePool> voicePool_;
+    double sampleRate_ = 48000.0;
+    int currentBank_ = 0;
+    int currentProgram_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)
 };
