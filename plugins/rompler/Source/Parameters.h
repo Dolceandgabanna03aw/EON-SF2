@@ -2,7 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-namespace aod
+namespace eon
 {
 
 /**
@@ -104,4 +104,4 @@ inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x" };
     return layout;
 }
 
-} // namespace aod
+} // namespace eon

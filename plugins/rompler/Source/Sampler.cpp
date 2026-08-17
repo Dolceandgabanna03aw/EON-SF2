@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace aod
+namespace eon
 {
 
 void Voice::start(const Sample* sample, float velocity) noexcept
@@ -109,4 +109,4 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate) noexce
             voice.render(output, numSamples, hostSampleRate);
 }
 
-} // namespace aod
+} // namespace eon

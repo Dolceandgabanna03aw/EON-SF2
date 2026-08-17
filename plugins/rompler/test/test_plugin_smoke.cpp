@@ -29,7 +29,7 @@ int main (int argc, char* argv[])
 
 TEST_CASE ("the processor renders silence without touching the real-time rules", "[plugin][smoke]")
 {
-    aod::RomplerProcessor processor;
+    eon::RomplerProcessor processor;
     processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
     processor.prepareToPlay (kSampleRate, kBlockSize);
 
@@ -66,7 +66,7 @@ TEST_CASE ("the processor renders silence without touching the real-time rules",
 
 TEST_CASE ("the processor declares an instrument bus layout", "[plugin][smoke]")
 {
-    aod::RomplerProcessor processor;
+    eon::RomplerProcessor processor;
 
     REQUIRE (processor.acceptsMidi());
     REQUIRE_FALSE (processor.producesMidi());
@@ -103,20 +103,20 @@ TEST_CASE ("the processor declares an instrument bus layout", "[plugin][smoke]")
 
 TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
 {
-    aod::RomplerProcessor processor;
+    eon::RomplerProcessor processor;
     auto& state = processor.getValueTreeState();
 
-    for (const auto* id : { aod::ParamIDs::voiceDrive,
-                            aod::ParamIDs::voiceCurve,
-                            aod::ParamIDs::voiceVelToDrive,
-                            aod::ParamIDs::voiceFilterRouting,
-                            aod::ParamIDs::voiceFilterOffset,
-                            aod::ParamIDs::polyLimit,
-                            aod::ParamIDs::busTapeDrive,
-                            aod::ParamIDs::busFold,
-                            aod::ParamIDs::busOsFactor,
-                            aod::ParamIDs::outTrim,
-                            aod::ParamIDs::outMix })
+    for (const auto* id : { eon::ParamIDs::voiceDrive,
+                            eon::ParamIDs::voiceCurve,
+                            eon::ParamIDs::voiceVelToDrive,
+                            eon::ParamIDs::voiceFilterRouting,
+                            eon::ParamIDs::voiceFilterOffset,
+                            eon::ParamIDs::polyLimit,
+                            eon::ParamIDs::busTapeDrive,
+                            eon::ParamIDs::busFold,
+                            eon::ParamIDs::busOsFactor,
+                            eon::ParamIDs::outTrim,
+                            eon::ParamIDs::outMix })
     {
         CAPTURE (id);
         REQUIRE (state.getParameter (id) != nullptr);
@@ -125,11 +125,11 @@ TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
 
 TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")
 {
-    aod::RomplerProcessor processor;
+    eon::RomplerProcessor processor;
     auto& state = processor.getValueTreeState();
 
-    auto* drive = state.getParameter (aod::ParamIDs::voiceDrive);
-    auto* curve = state.getParameter (aod::ParamIDs::voiceCurve);
+    auto* drive = state.getParameter (eon::ParamIDs::voiceDrive);
+    auto* curve = state.getParameter (eon::ParamIDs::voiceCurve);
     REQUIRE (drive != nullptr);
     REQUIRE (curve != nullptr);
 

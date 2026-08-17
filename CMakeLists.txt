@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # C is required by JUCE module sources on macOS even though none of our own code
 # uses it; without it the generate step fails on CMAKE_C_COMPILE_OBJECT.
-project(AgeOfDistortion VERSION 0.1.0 LANGUAGES CXX C)
+project(EON50 VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -19,10 +19,10 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
     if (! testSf2File().existsAsFile())
         SKIP ("test SF2 corpus not present on this machine");
 
-    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    eon::SF2Loader loader (static_cast<int> (kSampleRate));
     REQUIRE (loader.loadFile (testSf2File()));
 
-    aod::Sample* sample = loader.getSample (0, 33, 60, 100);
+    eon::Sample* sample = loader.getSample (0, 33, 60, 100);
     REQUIRE (sample != nullptr);
     REQUIRE (! sample->data.empty());
 }
@@ -32,7 +32,7 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
     if (! testSf2File().existsAsFile())
         SKIP ("test SF2 corpus not present on this machine");
 
-    aod::RomplerProcessor processor;
+    eon::RomplerProcessor processor;
     processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
     processor.prepareToPlay (kSampleRate, kBlockSize);
     processor.loadSoundFont (testSf2File());

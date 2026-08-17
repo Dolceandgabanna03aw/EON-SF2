@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace aod
+namespace eon
 {
 
 class SF2Loader
@@ -34,4 +34,4 @@ private:
     void resampleToHostRate(Sample& sample);
 };
 
-} // namespace aod
+} // namespace eon

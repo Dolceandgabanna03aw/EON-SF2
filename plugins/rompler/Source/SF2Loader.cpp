@@ -1,7 +1,7 @@
 #include "SF2Loader.h"
 #include <cstring>
 
-namespace aod
+namespace eon
 {
 
 namespace
@@ -129,4 +129,4 @@ void SF2Loader::resampleToHostRate(Sample& sample)
     sample.sampleRate = hostSampleRate_;
 }
 
-} // namespace aod
+} // namespace eon

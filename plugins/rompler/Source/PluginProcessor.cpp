@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 
-namespace aod
+namespace eon
 {
 
 RomplerProcessor::RomplerProcessor()
@@ -39,54 +40,65 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     buffer.clear();
 
-    if (!voicePool_ || !sf2Loader_)
-        return;
-
-    float* outL = buffer.getWritePointer(0);
     const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
 
-    for (const auto event : midiMessages)
+    if (voicePool_ != nullptr && sf2Loader_ != nullptr && numChannels > 0)
     {
-        const auto msg = event.getMessage();
+        float* outL = buffer.getWritePointer(0);
 
-        if (msg.isNoteOn())
+        for (const auto event : midiMessages)
         {
-            const int note = msg.getNoteNumber();
-            const int velocity = msg.getVelocity();
-            Sample* sample = sf2Loader_->getSample(currentBank_, currentProgram_, note, velocity);
+            const auto msg = event.getMessage();
 
-            if (sample != nullptr)
-                voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
+            if (msg.isNoteOn())
+            {
+                const int note = msg.getNoteNumber();
+                const int velocity = msg.getVelocity();
+                Sample* sample = sf2Loader_->getSample(getMidiBank(), getMidiProgram(), note, velocity);
+
+                if (sample != nullptr)
+                    voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
+            }
+            else if (msg.isNoteOff())
+            {
+                const int note = msg.getNoteNumber();
+                voicePool_->stop(note);
+            }
+            else if (msg.isProgramChange())
+            {
+                currentProgram_.store(msg.getProgramChangeNumber(), std::memory_order_relaxed);
+            }
         }
-        else if (msg.isNoteOff())
+
+        voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_));
+
+        if (numChannels > 1)
         {
-            const int note = msg.getNoteNumber();
-            voicePool_->stop(note);
+            float* outR = buffer.getWritePointer(1);
+            juce::FloatVectorOperations::copy(outR, outL, numSamples);
         }
-        else if (msg.isProgramChange())
-        {
-            currentProgram_ = msg.getProgramChangeNumber();
-        }
+
+        const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
+        const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;
+        const float outTrimGain = std::pow(10.0f, outTrimDb / 20.0f);
+
+        buffer.applyGain(outTrimGain);
     }
 
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_));
+    // Published for the editor's meter. Read on the message thread, so it is
+    // stored even on the silent path — a stale peak would leave the meter lit
+    // after the last voice ended.
+    float peak = 0.0f;
+    for (int channel = 0; channel < numChannels; ++channel)
+        peak = juce::jmax (peak, buffer.getMagnitude (channel, 0, numSamples));
 
-    if (buffer.getNumChannels() > 1)
-    {
-        float* outR = buffer.getWritePointer(1);
-        juce::FloatVectorOperations::copy(outR, outL, numSamples);
-    }
-
-    const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
-    const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;
-    const float outTrimGain = std::pow(10.0f, outTrimDb / 20.0f);
-
-    buffer.applyGain(outTrimGain);
+    peakLevel_.store (peak, std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* RomplerProcessor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor (*this);
+    return new RomplerEditor (*this);
 }
 
 void RomplerProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -102,20 +114,39 @@ void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
             apvts_.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-void RomplerProcessor::loadSoundFont(const juce::File& file)
+bool RomplerProcessor::loadSoundFont(const juce::File& file)
 {
-    sf2Loader_ = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
-    if (sf2Loader_->loadFile(file))
+    // Parsed and resampled on the calling thread. A bank takes far too long to
+    // build to do it while the audio thread is blocked.
+    auto incoming = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
+
+    if (! incoming->loadFile(file))
+        return false;
+
+    const auto [bank, program] = incoming->firstPresetProgram();
+
     {
-        const auto [bank, program] = sf2Loader_->firstPresetProgram();
-        currentBank_ = bank;
-        currentProgram_ = program;
+        // Voices hold raw Sample pointers into the loader's map, so they have to
+        // be released before the outgoing bank is freed. swap rather than assign:
+        // assignment would destroy the old bank here, with the audio thread
+        // waiting on the lock for the whole deallocation.
+        const juce::ScopedLock audioLock (getCallbackLock());
+
+        if (voicePool_ != nullptr)
+            voicePool_->stopAll();
+
+        sf2Loader_.swap (incoming);
+        currentBank_.store (bank, std::memory_order_relaxed);
+        currentProgram_.store (program, std::memory_order_relaxed);
     }
+    // `incoming` now holds the outgoing bank, freed here outside the lock.
+    loadedFileName_ = file.getFileName();
+    return true;
 }
 
-} // namespace aod
+} // namespace eon
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new aod::RomplerProcessor();
+    return new eon::RomplerProcessor();
 }

@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-namespace aod
+namespace eon
 {
 
 struct Sample
@@ -58,4 +58,4 @@ private:
     [[nodiscard]] Voice* findFreeVoice() noexcept;
 };
 
-} // namespace aod
+} // namespace eon

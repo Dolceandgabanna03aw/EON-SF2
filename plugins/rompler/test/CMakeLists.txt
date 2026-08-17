@@ -1,10 +1,10 @@
 add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp)
 
-# AgeOfDistortion carries the JucePlugin_* definitions PUBLIC, but JUCE modules
+# EON50 carries the JucePlugin_* definitions PUBLIC, but JUCE modules
 # are linked PRIVATE on the shared-code target by convention, so their include
 # directories do not propagate. The test needs the module explicitly.
 target_link_libraries(rompler_tests PRIVATE
-    AgeOfDistortion
+    EON50
     juce::juce_audio_utils
     x10::sf2
     x10::instrument
