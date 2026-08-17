@@ -1,4 +1,4 @@
-add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp)
+add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp test_voice_dsp.cpp)
 
 # EON50 carries the JucePlugin_* definitions PUBLIC, but JUCE modules
 # are linked PRIVATE on the shared-code target by convention, so their include
@@ -6,6 +6,8 @@ add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp)
 target_link_libraries(rompler_tests PRIVATE
     EON50
     juce::juce_audio_utils
+    juce::juce_dsp
+    x10::dsp
     x10::sf2
     x10::instrument
     Catch2::Catch2)

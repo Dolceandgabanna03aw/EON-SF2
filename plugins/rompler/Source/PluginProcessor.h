@@ -4,6 +4,7 @@
 
 #include <atomic>
 
+#include "BusStage.h"
 #include "Parameters.h"
 #include "Sampler.h"
 #include "SF2Loader.h"
@@ -11,7 +12,8 @@
 namespace eon
 {
 
-class RomplerProcessor final : public juce::AudioProcessor
+class RomplerProcessor final : public juce::AudioProcessor,
+                               private juce::AsyncUpdater
 {
 public:
     RomplerProcessor();
@@ -69,11 +71,29 @@ public:
         return peakLevel_.load (std::memory_order_relaxed);
     }
 
+    /** Applies a pending latency change now instead of on the next message loop
+        pass. For tests, which have no message loop running. */
+    void flushPendingLatencyUpdate() { handleUpdateNowIfNeeded(); }
+
 private:
+    /** Pushes the oversampler's latency to the host off the audio thread. */
+    void handleAsyncUpdate() override;
+
+    [[nodiscard]] VoiceSettings readVoiceSettings() const;
+    [[nodiscard]] float rawParameter (const char* parameterID, float fallback) const;
+
     juce::AudioProcessorValueTreeState apvts_;
     std::unique_ptr<SF2Loader> sf2Loader_;
     std::unique_ptr<VoicePool> voicePool_;
+    BusStage busStage_;
+
+    // The dry path skips the bus stage, so it has to be delayed by the same
+    // amount the oversampler adds or out.mix combs the two against each other.
+    juce::AudioBuffer<float> dryBuffer_, wetBuffer_;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay_ { 1024 };
+
     double sampleRate_ = 48000.0;
+    int activeOversamplingIndex_ = -1;
 
     // Written by loadSoundFont on the message thread and by processBlock on the
     // audio thread (program change), so neither can be a plain int.

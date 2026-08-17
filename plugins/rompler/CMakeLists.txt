@@ -19,6 +19,7 @@ target_sources(EON50 PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Widgets.cpp
+    Source/BusStage.cpp
     Source/Sampler.cpp
     Source/SF2Loader.cpp)
 target_include_directories(EON50 PRIVATE Source)
@@ -39,6 +40,7 @@ target_link_libraries(EON50
         x10::sf2
         x10::instrument
         juce::juce_audio_utils
+        juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)

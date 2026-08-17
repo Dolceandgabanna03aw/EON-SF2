@@ -54,7 +54,19 @@ bool SF2Loader::loadFile(const juce::File& file)
                                                      ? region.loopStart - region.start : 0);
             sample.loopEnd = static_cast<int>(region.loopEnd > region.start
                                                    ? region.loopEnd - region.start : 0);
-            sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
+            sample.loopMode = region.loopMode;
+
+            // Copied rather than referenced: the voice reads these on the audio
+            // thread and the RegionIndex owning this Region can be swapped out
+            // by a bank load while a note is still sounding.
+            sample.rootKey = region.rootKey;
+            sample.tuneCents = region.tuneCents;
+            sample.scaleTuningCentsPerKey = region.scaleTuningCentsPerKey;
+            sample.attenuationDb = region.attenuationDb;
+            sample.pan = region.pan;
+            sample.filterCutoffHz = region.filterCutoffHz;
+            sample.filterResonanceDb = region.filterResonanceDb;
+            sample.volumeEnvelope = region.volumeEnvelope;
 
             resampleToHostRate(sample);
 
@@ -127,6 +139,13 @@ void SF2Loader::resampleToHostRate(Sample& sample)
 
     sample.data = std::move(resampled);
     sample.sampleRate = hostSampleRate_;
+
+    // Loop points are frame indices into the data that was just rewritten, so
+    // they move with it. Leaving them alone detunes every looping note on any
+    // bank whose samples are not already at the host rate — which is most of
+    // them, since 44.1 kHz banks are the norm.
+    sample.loopStart = static_cast<int>(static_cast<float>(sample.loopStart) * ratio);
+    sample.loopEnd = static_cast<int>(static_cast<float>(sample.loopEnd) * ratio);
 }
 
 } // namespace eon

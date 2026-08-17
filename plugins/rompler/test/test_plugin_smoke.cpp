@@ -72,8 +72,9 @@ TEST_CASE ("the processor declares an instrument bus layout", "[plugin][smoke]")
     REQUIRE_FALSE (processor.producesMidi());
     REQUIRE_FALSE (processor.isMidiEffect());
 
-    // Latency must stay honest. Once bus.osFactor drives a real halfband chain
-    // this expectation changes, and it should change deliberately.
+    // Before prepareToPlay there is no oversampler and so nothing to be late
+    // by. What the halfband chain actually costs once it exists is pinned by
+    // "oversampling reports its latency to the host" in test_voice_dsp.cpp.
     REQUIRE (processor.getLatencySamples() == 0);
 
     // The processor declares no input bus at all, so a candidate layout must

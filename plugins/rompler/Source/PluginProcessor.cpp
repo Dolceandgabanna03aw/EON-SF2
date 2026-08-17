@@ -14,14 +14,55 @@ RomplerProcessor::RomplerProcessor()
 
 void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
-    juce::ignoreUnused (maximumExpectedSamplesPerBlock);
     sampleRate_ = sampleRate;
+
     voicePool_ = std::make_unique<VoicePool>();
+    voicePool_->prepare (sampleRate);
+
+    busStage_.prepare (sampleRate, maximumExpectedSamplesPerBlock, 2);
+
+    dryBuffer_.setSize (2, maximumExpectedSamplesPerBlock, false, false, true);
+    wetBuffer_.setSize (2, maximumExpectedSamplesPerBlock, false, false, true);
+
+    const auto maximumLatency = busStage_.latencySamples (static_cast<int> (BusStage::factors.size()) - 1);
+    dryDelay_.setMaximumDelayInSamples (juce::jmax (1, maximumLatency + 1));
+    dryDelay_.prepare ({ sampleRate, static_cast<juce::uint32> (maximumExpectedSamplesPerBlock), 2 });
+
+    activeOversamplingIndex_ = -1;
 }
 
 void RomplerProcessor::releaseResources()
 {
     voicePool_.reset();
+    busStage_.reset();
+    dryDelay_.reset();
+}
+
+void RomplerProcessor::handleAsyncUpdate()
+{
+    setLatencySamples (busStage_.latencySamples (activeOversamplingIndex_));
+}
+
+float RomplerProcessor::rawParameter (const char* parameterID, float fallback) const
+{
+    if (const auto* value = apvts_.getRawParameterValue (parameterID))
+        return value->load();
+
+    return fallback;
+}
+
+VoiceSettings RomplerProcessor::readVoiceSettings() const
+{
+    VoiceSettings settings;
+
+    settings.drive01 = rawParameter (ParamIDs::voiceDrive, 20.0f) * 0.01f;
+    settings.velocityToDrive = rawParameter (ParamIDs::voiceVelToDrive, 50.0f) * 0.01f;
+    settings.curve = static_cast<VoiceCurve> (juce::jlimit (0, 2,
+        static_cast<int> (rawParameter (ParamIDs::voiceCurve, 0.0f))));
+    settings.filterBeforeDrive = rawParameter (ParamIDs::voiceFilterRouting, 0.0f) < 0.5f;
+    settings.filterOffsetCents = rawParameter (ParamIDs::voiceFilterOffset, 0.0f);
+
+    return settings;
 }
 
 bool RomplerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -43,47 +84,105 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
 
-    if (voicePool_ != nullptr && sf2Loader_ != nullptr && numChannels > 0)
+    if (voicePool_ != nullptr && numChannels > 0 && numSamples <= dryBuffer_.getNumSamples())
     {
-        float* outL = buffer.getWritePointer(0);
+        const int oversamplingIndex = juce::jlimit (0, static_cast<int> (BusStage::factors.size()) - 1,
+            static_cast<int> (rawParameter (ParamIDs::busOsFactor, 2.0f)));
 
-        for (const auto event : midiMessages)
+        if (oversamplingIndex != activeOversamplingIndex_)
         {
-            const auto msg = event.getMessage();
+            activeOversamplingIndex_ = oversamplingIndex;
 
-            if (msg.isNoteOn())
-            {
-                const int note = msg.getNoteNumber();
-                const int velocity = msg.getVelocity();
-                Sample* sample = sf2Loader_->getSample(getMidiBank(), getMidiProgram(), note, velocity);
+            // setLatencySamples notifies the host, which is not something to do
+            // from here; the async update runs it on the message thread.
+            triggerAsyncUpdate();
+        }
 
-                if (sample != nullptr)
-                    voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
-            }
-            else if (msg.isNoteOff())
+        voicePool_->setPolyphony (static_cast<int> (rawParameter (ParamIDs::polyLimit, 32.0f)));
+
+        dryBuffer_.clear();
+        wetBuffer_.clear();
+
+        if (sf2Loader_ != nullptr)
+        {
+            for (const auto event : midiMessages)
             {
-                const int note = msg.getNoteNumber();
-                voicePool_->stop(note);
+                const auto msg = event.getMessage();
+
+                if (msg.isNoteOn())
+                {
+                    const int note = msg.getNoteNumber();
+                    const int velocity = msg.getVelocity();
+                    Sample* sample = sf2Loader_->getSample(getMidiBank(), getMidiProgram(), note, velocity);
+
+                    if (sample != nullptr)
+                        voicePool_->noteOn(sample, note, static_cast<float>(velocity) / 127.0f);
+                }
+                else if (msg.isNoteOff())
+                {
+                    voicePool_->noteOff(msg.getNoteNumber());
+                }
+                else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+                {
+                    voicePool_->stopAll();
+                }
+                else if (msg.isProgramChange())
+                {
+                    currentProgram_.store(msg.getProgramChangeNumber(), std::memory_order_relaxed);
+                }
             }
-            else if (msg.isProgramChange())
+
+            voicePool_->render (dryBuffer_.getWritePointer (0), dryBuffer_.getWritePointer (1),
+                                wetBuffer_.getWritePointer (0), wetBuffer_.getWritePointer (1),
+                                numSamples, readVoiceSettings());
+        }
+
+        juce::AudioBuffer<float> wetView (wetBuffer_.getArrayOfWritePointers(), 2, numSamples);
+        busStage_.process (wetView,
+                           rawParameter (ParamIDs::busTapeDrive, 0.0f) * 0.01f,
+                           rawParameter (ParamIDs::busFold, 0.0f) * 0.01f,
+                           oversamplingIndex);
+
+        const int latency = busStage_.latencySamples (oversamplingIndex);
+
+        const float mix = juce::jlimit (0.0f, 1.0f, rawParameter (ParamIDs::outMix, 100.0f) * 0.01f);
+        const float outTrimGain = juce::Decibels::decibelsToGain (rawParameter (ParamIDs::outTrim, 0.0f));
+
+        const float* dryLeft  = dryBuffer_.getReadPointer (0);
+        const float* dryRight = dryBuffer_.getReadPointer (1);
+        const float* wetLeft  = wetBuffer_.getReadPointer (0);
+        const float* wetRight = wetBuffer_.getReadPointer (1);
+
+        const bool mono = numChannels < 2;
+        float* outLeft  = buffer.getWritePointer (0);
+        float* outRight = mono ? nullptr : buffer.getWritePointer (1);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // Both delay channels are advanced every sample regardless of the
+            // host's layout, so a mono bus cannot desynchronise them.
+            dryDelay_.pushSample (0, dryLeft[i]);
+            dryDelay_.pushSample (1, dryRight[i]);
+
+            const float alignedLeft  = dryDelay_.popSample (0, static_cast<float> (latency), true);
+            const float alignedRight = dryDelay_.popSample (1, static_cast<float> (latency), true);
+
+            const float left  = (alignedLeft  * (1.0f - mix) + wetLeft[i]  * mix) * outTrimGain;
+            const float right = (alignedRight * (1.0f - mix) + wetRight[i] * mix) * outTrimGain;
+
+            if (mono)
             {
-                currentProgram_.store(msg.getProgramChangeNumber(), std::memory_order_relaxed);
+                outLeft[i] = 0.5f * (left + right);
+            }
+            else
+            {
+                outLeft[i] = left;
+                outRight[i] = right;
             }
         }
 
-        voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_));
-
-        if (numChannels > 1)
-        {
-            float* outR = buffer.getWritePointer(1);
-            juce::FloatVectorOperations::copy(outR, outL, numSamples);
-        }
-
-        const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
-        const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;
-        const float outTrimGain = std::pow(10.0f, outTrimDb / 20.0f);
-
-        buffer.applyGain(outTrimGain);
+        for (int channel = 2; channel < numChannels; ++channel)
+            buffer.clear (channel, 0, numSamples);
     }
 
     // Published for the editor's meter. Read on the message thread, so it is
