@@ -14,9 +14,18 @@ RomplerProcessor::RomplerProcessor()
 
 void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
-    juce::ignoreUnused (maximumExpectedSamplesPerBlock);
     sampleRate_ = sampleRate;
     voicePool_ = std::make_unique<VoicePool>();
+
+    busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
+
+    // The oversampling factor is fixed for this prepareToPlay session; see
+    // BusProcessor::process for why it cannot change mid-stream without a
+    // message-thread call. setLatencySamples() itself is safe to call here —
+    // this runs before the host starts pumping audio through processBlock.
+    const auto osFactorParam = apvts_.getRawParameterValue (ParamIDs::busOsFactor);
+    cachedOsFactorIndex_ = osFactorParam ? static_cast<int> (osFactorParam->load()) : 2;
+    setLatencySamples (busProcessor_.getLatencySamples (cachedOsFactorIndex_));
 }
 
 void RomplerProcessor::releaseResources()
@@ -75,16 +84,28 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
     const auto curveParam = apvts_.getRawParameterValue(ParamIDs::voiceCurve);
+    const auto filterRoutingParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterRouting);
+    const auto filterOffsetParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterOffset);
     const float driveDb = driveParam ? driveParam->load() : 0.0f;
     const int curveId = curveParam ? static_cast<int>(curveParam->load()) : 0;
+    const int filterRouting = filterRoutingParam ? static_cast<int>(filterRoutingParam->load()) : 0;
+    const float filterOffsetCents = filterOffsetParam ? filterOffsetParam->load() : 0.0f;
 
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, curveId);
+    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, curveId,
+                        filterRouting, filterOffsetCents);
 
     if (buffer.getNumChannels() > 1)
     {
         float* outR = buffer.getWritePointer(1);
         juce::FloatVectorOperations::copy(outR, outL, numSamples);
     }
+
+    const auto tapeDriveParam = apvts_.getRawParameterValue(ParamIDs::busTapeDrive);
+    const auto foldParam = apvts_.getRawParameterValue(ParamIDs::busFold);
+    const float tapeDrivePercent = tapeDriveParam ? tapeDriveParam->load() : 0.0f;
+    const float foldPercent = foldParam ? foldParam->load() : 0.0f;
+
+    busProcessor_.process (buffer, tapeDrivePercent, foldPercent, cachedOsFactorIndex_);
 
     const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
     const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;

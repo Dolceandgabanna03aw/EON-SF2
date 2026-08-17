@@ -12,6 +12,7 @@ void Voice::start(const Sample* sample, float velocity) noexcept
     phase_ = 0.0;
     envPhase_ = 0.0f;
     active_ = true;
+    filterNeedsPrepare_ = true;
 }
 
 void Voice::stop() noexcept
@@ -32,10 +33,24 @@ float Voice::envelope() const noexcept
     return sustainLevel;
 }
 
-void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept
+void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
+                    int filterRouting, float filterOffsetCents) noexcept
 {
     if (!active_ || sample_ == nullptr || sample_->data.empty())
         return;
+
+    if (filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate)
+    {
+        filter_.prepare (static_cast<double> (hostSampleRate));
+        filterSampleRate_ = hostSampleRate;
+        filterNeedsPrepare_ = false;
+    }
+
+    const float cutoffHz = std::clamp (
+        sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
+        20.0f, static_cast<float> (hostSampleRate) * 0.49f);
+    const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
+    filter_.setCutoff (cutoffHz, q);
 
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
@@ -58,6 +73,9 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         float sample = interpolated * velocity_ * envelope();
 
+        if (filterRouting == 0) // Pre: filter before drive
+            sample = filter_.process (sample);
+
         // Apply nonlinear drive based on curve ID
         const float driven = driveGain * sample;
         if (curveId == 1)
@@ -66,6 +84,9 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             sample = x10::dsp::curves::Transformer::f (driven) / driveGain;
         else // curveId == 0 or default
             sample = x10::dsp::curves::Tanh::f (driven) / driveGain;
+
+        if (filterRouting != 0) // Post: filter after drive
+            sample = filter_.process (sample);
 
         output[i] += sample;
 
@@ -112,13 +133,14 @@ Voice* VoicePool::findFreeVoice() noexcept
     return nullptr;
 }
 
-void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept
+void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
+                        int filterRouting, float filterOffsetCents) noexcept
 {
     std::fill(output, output + numSamples, 0.0f);
 
     for (auto& voice : voices_)
         if (voice.isActive())
-            voice.render(output, numSamples, hostSampleRate, driveDb, curveId);
+            voice.render(output, numSamples, hostSampleRate, driveDb, curveId, filterRouting, filterOffsetCents);
 }
 
 } // namespace aod

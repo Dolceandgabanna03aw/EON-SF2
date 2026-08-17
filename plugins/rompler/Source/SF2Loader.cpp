@@ -55,6 +55,8 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.loopEnd = static_cast<int>(region.loopEnd > region.start
                                                    ? region.loopEnd - region.start : 0);
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
+            sample.filterCutoffHz = region.filterCutoffHz;
+            sample.filterResonanceDb = region.filterResonanceDb;
 
             resampleToHostRate(sample);
 

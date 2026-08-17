@@ -19,7 +19,8 @@ target_sources(AgeOfDistortion PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Sampler.cpp
-    Source/SF2Loader.cpp)
+    Source/SF2Loader.cpp
+    Source/BusProcessor.cpp)
 target_include_directories(AgeOfDistortion PRIVATE Source)
 
 target_compile_definitions(AgeOfDistortion PUBLIC
@@ -38,6 +39,7 @@ target_link_libraries(AgeOfDistortion
         x10::sf2
         x10::instrument
         juce::juce_audio_utils
+        juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)

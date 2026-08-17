@@ -6,6 +6,8 @@ add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp)
 target_link_libraries(rompler_tests PRIVATE
     AgeOfDistortion
     juce::juce_audio_utils
+    juce::juce_dsp
+    x10::dsp
     x10::sf2
     x10::instrument
     Catch2::Catch2)

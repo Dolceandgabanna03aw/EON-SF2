@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <x10/instrument/RegionIndex.h>
 #include <x10/dsp/nonlinear/Curves.h>
+#include <x10/dsp/filter/TptSvf.h>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -18,6 +19,8 @@ struct Sample
     int loopStart = 0;
     int loopEnd = 0;
     bool loopEnabled = false;
+    float filterCutoffHz = 19912.13f;
+    float filterResonanceDb = 0.0f;
 };
 
 class Voice
@@ -27,7 +30,8 @@ public:
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
+                int filterRouting, float filterOffsetCents) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -35,6 +39,10 @@ private:
     float velocity_ = 0.0f;
     bool active_ = false;
     float envPhase_ = 0.0f;
+
+    x10::dsp::TptSvf filter_;
+    bool filterNeedsPrepare_ = true;
+    int filterSampleRate_ = 0;
 
     [[nodiscard]] float envelope() const noexcept;
 };
@@ -50,7 +58,8 @@ public:
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
+                int filterRouting, float filterOffsetCents) noexcept;
 
 private:
     std::vector<Voice> voices_;

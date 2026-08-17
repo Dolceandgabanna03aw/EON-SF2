@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "Sampler.h"
 #include "SF2Loader.h"
+#include "BusProcessor.h"
 
 namespace aod
 {
@@ -72,6 +73,8 @@ private:
     std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
 
     std::unique_ptr<VoicePool> voicePool_;
+    BusProcessor busProcessor_;
+    int cachedOsFactorIndex_ = 2;
     double sampleRate_ = 48000.0;
     std::atomic<int> currentBank_ { 0 };
     std::atomic<int> currentProgram_ { 0 };
