@@ -10,5 +10,10 @@ compile_commands.json
 # Reference renders and measurement scratch output
 *.wav
 !test/fixtures/**/*.wav
+
 # Large local SoundFont test collection (~1.9 GB, untracked)
+# Real-world SF2 corpus for local cross-checking (tools/sf2_crosscheck).
+# Never committed: files are megabytes each and most carry sample-pack
+# licensing that doesn't permit redistribution (planning document §10).
+# Synthetic fixtures for the actual test suite live in libs/sf2/test/support.
 testdata/
