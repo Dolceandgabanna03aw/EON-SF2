@@ -2,11 +2,15 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <queue>
+#include <mutex>
+#include <tuple>
 
 #include "Parameters.h"
 #include "Sampler.h"
 #include "SF2Loader.h"
 #include "BusProcessor.h"
+#include "FxProcessor.h"
 
 namespace aod
 {
@@ -30,7 +34,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override { return 4.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -42,6 +46,9 @@ public:
     void setStateInformation (const void*, int) override;
 
     [[nodiscard]] juce::AudioProcessorValueTreeState& getValueTreeState() noexcept { return apvts_; }
+
+    /** Peak magnitude of the most recently rendered block, for the UI meter. */
+    [[nodiscard]] float getLastPeak() const noexcept { return lastPeak_.load (std::memory_order_relaxed); }
 
     /**
         Loads a SoundFont from disk and, on success, selects its first preset.
@@ -62,6 +69,20 @@ public:
     /** Selects which (bank, program) note-on resolves against. Message-thread only. */
     void selectPreset (int bank, int program) noexcept;
 
+    /** Current (bank, program) pair, for the UI readout. Message-thread safe. */
+    [[nodiscard]] std::pair<int, int> getCurrentBankProgram() const noexcept
+    {
+        return { currentBank_.load (std::memory_order_relaxed),
+                 currentProgram_.load (std::memory_order_relaxed) };
+    }
+
+    /**
+        Queues a note-on/off for the audio thread. Called from the message thread
+        (UI keyboard, computer keyboard); drained inside processBlock() so it is
+        sample-accurate and allocation-free on the audio thread.
+    */
+    void postNote (int note, bool on, int velocity = 100);
+
 private:
     juce::AudioProcessorValueTreeState apvts_;
 
@@ -74,10 +95,18 @@ private:
 
     std::unique_ptr<VoicePool> voicePool_;
     BusProcessor busProcessor_;
+    FxProcessor fxProcessor_;
     int cachedOsFactorIndex_ = 2;
     double sampleRate_ = 48000.0;
     std::atomic<int> currentBank_ { 0 };
     std::atomic<int> currentProgram_ { 0 };
+    std::atomic<float> lastPeak_ { 0.0f };
+
+    // Message-thread -> audio-thread note events. Bounded; if the host is not
+    // running we drop rather than grow unbounded.
+    std::queue<std::tuple<int, bool, int>> noteQueue_;
+    std::mutex noteQueueMutex_;
+
     juce::String loadedFileName_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)

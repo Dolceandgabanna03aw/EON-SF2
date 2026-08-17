@@ -29,6 +29,12 @@ inline constexpr auto busFold            = "bus.fold";
 inline constexpr auto busOsFactor        = "bus.osFactor";
 inline constexpr auto outTrim            = "out.trim";
 inline constexpr auto outMix             = "out.mix";
+inline constexpr auto fxChorusRate       = "fx.chorusRate";
+inline constexpr auto fxChorusDepth      = "fx.chorusDepth";
+inline constexpr auto fxChorusMix        = "fx.chorusMix";
+inline constexpr auto fxReverbRoom       = "fx.reverbRoom";
+inline constexpr auto fxReverbDamp       = "fx.reverbDamp";
+inline constexpr auto fxReverbMix        = "fx.reverbMix";
 } // namespace ParamIDs
 
 /** Choice orderings, kept here so the DSP and the UI cannot disagree on them. */
@@ -48,6 +54,7 @@ inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x" };
     const auto percent = String ("%");
     const auto cents   = String (" cents");
     const auto decibel = String (" dB");
+    const auto hertz   = String (" Hz");
 
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { ParamIDs::voiceDrive, 1 }, "Drive",
@@ -99,6 +106,36 @@ inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x" };
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { ParamIDs::outMix, 1 }, "Mix",
         NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 100.0f,
+        AudioParameterFloatAttributes{}.withLabel (percent)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxChorusRate, 1 }, "Chorus Rate",
+        NormalisableRange<float> { 0.05f, 5.0f, 0.01f }, 1.0f,
+        AudioParameterFloatAttributes{}.withLabel (hertz)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxChorusDepth, 1 }, "Chorus Depth",
+        NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 30.0f,
+        AudioParameterFloatAttributes{}.withLabel (percent)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxChorusMix, 1 }, "Chorus Mix",
+        NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 25.0f,
+        AudioParameterFloatAttributes{}.withLabel (percent)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxReverbRoom, 1 }, "Reverb Room",
+        NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 40.0f,
+        AudioParameterFloatAttributes{}.withLabel (percent)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxReverbDamp, 1 }, "Reverb Damp",
+        NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 50.0f,
+        AudioParameterFloatAttributes{}.withLabel (percent)));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { ParamIDs::fxReverbMix, 1 }, "Reverb Mix",
+        NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 20.0f,
         AudioParameterFloatAttributes{}.withLabel (percent)));
 
     return layout;

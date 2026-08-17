@@ -116,7 +116,13 @@ TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
                             aod::ParamIDs::busFold,
                             aod::ParamIDs::busOsFactor,
                             aod::ParamIDs::outTrim,
-                            aod::ParamIDs::outMix })
+                            aod::ParamIDs::outMix,
+                            aod::ParamIDs::fxChorusRate,
+                            aod::ParamIDs::fxChorusDepth,
+                            aod::ParamIDs::fxChorusMix,
+                            aod::ParamIDs::fxReverbRoom,
+                            aod::ParamIDs::fxReverbDamp,
+                            aod::ParamIDs::fxReverbMix })
     {
         CAPTURE (id);
         REQUIRE (state.getParameter (id) != nullptr);

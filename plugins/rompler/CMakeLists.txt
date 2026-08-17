@@ -20,7 +20,8 @@ target_sources(EONDS50 PRIVATE
     Source/PluginEditor.cpp
     Source/Sampler.cpp
     Source/SF2Loader.cpp
-    Source/BusProcessor.cpp)
+    Source/BusProcessor.cpp
+    Source/FxProcessor.cpp)
 target_include_directories(EONDS50 PRIVATE Source)
 
 target_compile_definitions(EONDS50 PUBLIC

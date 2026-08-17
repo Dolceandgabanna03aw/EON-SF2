@@ -4,6 +4,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
 #include <array>
+#include <vector>
+#include <functional>
 
 #include "PluginProcessor.h"
 #include "Parameters.h"
@@ -11,40 +13,218 @@
 namespace aod
 {
 
-class ParameterControl final : public juce::Component
+// Shared synth-deck palette, sampled from the design mockup.
+namespace theme
+{
+    inline juce::Colour body         { 0xff232622 };
+    inline juce::Colour body2        { 0xff171916 };
+    inline juce::Colour bodyEdge     { 0xff34382f };
+    inline juce::Colour panel        { 0xffded7bd };
+    inline juce::Colour panelEdge    { 0xffb6ae8f };
+    inline juce::Colour ink          { 0xff221f1a };
+    inline juce::Colour inkSoft      { 0xff56503f };
+    inline juce::Colour mint         { 0xff7fe0c4 };
+    inline juce::Colour mintDeep     { 0xff34a984 };
+    inline juce::Colour mintGlow     { 0xff7fe0c4 };
+    inline juce::Colour hot          { 0xffff9452 };
+    inline juce::Colour hotDeep      { 0xffc96324 };
+    inline juce::Colour knobCream    { 0xfff2ecd8 };
+    inline juce::Colour knobShadow   { 0xffb7ae8e };
+    inline juce::Colour ledRed       { 0xffff4d3d };
+    inline juce::Colour ledHot       { 0xffffb454 };
+    inline juce::Colour ledMint      { 0xff7fe0c4 };
+    inline juce::Colour ledOff       { 0xff2a2e28 };
+    inline juce::Colour displayBg    { 0xff0e1613 };
+}
+
+// Build a font at a given point height, optionally bold.
+inline juce::Font makeFont (float pt, bool bold)
+{
+    return bold ? juce::Font (juce::FontOptions (pt, juce::Font::bold))
+                : juce::Font (juce::FontOptions (pt));
+}
+
+/**
+    A mint-outlined cream panel with a tab label in its top edge, like the
+    microKORG-style function boxes in the design mockup. Child controls are
+    laid out by the owning editor; this class just draws the box.
+*/
+class SectionBox final : public juce::Component
 {
 public:
-    ParameterControl (juce::RangedAudioParameter& param);
-    ~ParameterControl() override;
+    explicit SectionBox (const juce::String& title);
+    ~SectionBox() override;
+    void paint (juce::Graphics&) override;
+
+private:
+    juce::Label title_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SectionBox)
+};
+
+/**
+    Rotary control drawn as a cream knob with a mint pointer, styled for the
+    synth-deck panel. Drives a single RangedAudioParameter through a
+    SliderParameterAttachment. Vertical drag and the mouse wheel change the
+    value; the name and live value print below.
+*/
+class Knob final : public juce::Component
+{
+public:
+    explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
+    ~Knob() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
     [[maybe_unused]] juce::RangedAudioParameter& param_;
-    juce::Label label_;
     juce::Slider slider_;
+    juce::Label name_;
+    juce::Label value_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
+    float lastDragY_ = 0.0f;
+    bool hot_ = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Knob)
 };
 
-class ParameterChoiceControl final : public juce::Component
+/**
+    A labelled segmented button group for choice parameters, like the CURVE
+    and OVERSAMPLE switches in the mockup. Drives an AudioParameterChoice via
+    a ComboBoxParameterAttachment backed by a hidden combo box.
+*/
+class Switch final : public juce::Component
 {
 public:
-    ParameterChoiceControl (juce::AudioParameterChoice& param);
-    ~ParameterChoiceControl() override;
+    explicit Switch (juce::AudioParameterChoice& param);
+    ~Switch() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    void rebuildSegments();
+
+    [[maybe_unused]] juce::AudioParameterChoice& param_;
+    juce::Label label_;
+    juce::ComboBox box_;
+    std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
+    std::vector<juce::Rectangle<int>> segments_;
+    int numSegments_ = 0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Switch)
+};
+
+/**
+    A 2-way toggle switch, like the FILTER ROUTE Pre/Post switch in the
+    mockup. Drives an AudioParameterChoice with exactly two choices.
+*/
+class Toggle final : public juce::Component
+{
+public:
+    explicit Toggle (juce::AudioParameterChoice& param);
+    ~Toggle() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     [[maybe_unused]] juce::AudioParameterChoice& param_;
     juce::Label label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Toggle)
+};
+
+/**
+    A numeric stepper with up/down arrows and an LED digit readout, like the
+    POLYPHONY control in the mockup. Drives an AudioParameterInt via a
+    SliderParameterAttachment backed by a hidden slider.
+*/
+class Stepper final : public juce::Component
+{
+public:
+    explicit Stepper (juce::RangedAudioParameter& param);
+    ~Stepper() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    [[maybe_unused]] juce::RangedAudioParameter& param_;
+    juce::Label label_;
+    juce::Slider slider_;
+    std::unique_ptr<juce::SliderParameterAttachment> attachment_;
+    juce::Rectangle<int> upArrow_;
+    juce::Rectangle<int> downArrow_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Stepper)
+};
+
+/** A column of LED segments that light up with the output peak level. */
+class PeakMeter final : public juce::Component
+{
+public:
+    PeakMeter();
+    ~PeakMeter() override;
+
+    void setLevel (float level);   // 0..1
+    void paint (juce::Graphics&) override;
+
+private:
+    static constexpr int numSegments = 8;
+    float level_ = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PeakMeter)
+};
+
+struct PianoKey
+{
+    int note = 0;
+    bool black = false;
+    int whiteIndex = 0;   // white key this black key sits immediately to the right of
+};
+
+/** A clickable, playable piano. Sends note-on/off to the processor. */
+class Keyboard final : public juce::Component
+{
+public:
+    Keyboard();
+    ~Keyboard() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+    void setKeyRange (int lowNote, int numKeys);
+    void setNoteOn (int note, bool on);
+    void setNoteCallback (std::function<void (int, bool)> cb) { noteCallback_ = std::move (cb); }
+    int findNote (juce::Point<float>) const;
+
+private:
+    juce::Rectangle<int> boundsFor (const PianoKey&) const;
+
+    std::vector<PianoKey> keys_;
+    int numWhite_ = 0;
+    juce::HashMap<int, bool> lit_;
+    std::function<void (int, bool)> noteCallback_;   // set by the editor -> postNote
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Keyboard)
 };
 
 class RomplerEditor final : public juce::AudioProcessorEditor,
-                             private juce::ComboBox::Listener
+                            private juce::ComboBox::Listener,
+                            private juce::Timer
 {
 public:
     explicit RomplerEditor (RomplerProcessor& processorRef);
@@ -56,17 +236,38 @@ public:
 private:
     RomplerProcessor& processor_;
 
-    juce::TextButton loadButton_ { "Load SoundFont..." };
-    juce::Label fileLabel_;
-    juce::ComboBox presetBox_;
+    juce::Label brandTitle_;
+    juce::Label brandSub_;
+    juce::Label badges_;
 
-    std::array<std::unique_ptr<juce::Component>, 11> paramControls_;
+    SectionBox voiceBox_;
+    SectionBox busBox_;
+    SectionBox fxBox_;
+
+    // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10), FX (11-16).
+    std::array<std::unique_ptr<juce::Component>, 17> controls_;
+
+    juce::Label sfLabel_;
+    juce::Label sfDisplay_;
+    juce::Label bankDigits_;
+    juce::Label progDigits_;
+    juce::TextButton loadButton_ { "LOAD" };
+    PeakMeter peakMeter_;
+
+    Keyboard keyboard_;
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
+    void refreshDisplay();
     void refreshPresetList();
-    void comboBoxChanged (juce::ComboBox*) override;
+    void onPresetChanged();
     void onLoadButtonClicked();
+    void layoutVoiceControls (juce::Rectangle<int> area);
+    void layoutBusControls (juce::Rectangle<int> area);
+    void layoutFxControls (juce::Rectangle<int> area);
+
+    void comboBoxChanged (juce::ComboBox*) override;
+    void timerCallback() override;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerEditor)
 };
