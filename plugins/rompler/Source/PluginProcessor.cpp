@@ -73,7 +73,12 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         }
     }
 
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_));
+    const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
+    const auto curveParam = apvts_.getRawParameterValue(ParamIDs::voiceCurve);
+    const float driveDb = driveParam ? driveParam->load() : 0.0f;
+    const int curveId = curveParam ? static_cast<int>(curveParam->load()) : 0;
+
+    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, curveId);
 
     if (buffer.getNumChannels() > 1)
     {

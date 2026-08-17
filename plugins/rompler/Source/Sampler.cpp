@@ -32,7 +32,7 @@ float Voice::envelope() const noexcept
     return sustainLevel;
 }
 
-void Voice::render(float* output, int numSamples, int hostSampleRate) noexcept
+void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept
 {
     if (!active_ || sample_ == nullptr || sample_->data.empty())
         return;
@@ -40,6 +40,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate) noexcept
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
     const float invHostSampleRate = 1.0f / static_cast<float>(hostSampleRate);
+    const float driveGain = std::pow(10.0f, driveDb / 20.0f);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -55,7 +56,18 @@ void Voice::render(float* output, int numSamples, int hostSampleRate) noexcept
         const float s1 = sampleData[static_cast<std::size_t>(index) + 1];
         const float interpolated = s0 + frac * (s1 - s0);
 
-        output[i] += interpolated * velocity_ * envelope();
+        float sample = interpolated * velocity_ * envelope();
+
+        // Apply nonlinear drive based on curve ID
+        const float driven = driveGain * sample;
+        if (curveId == 1)
+            sample = x10::dsp::curves::Tube::f (driven) / driveGain;
+        else if (curveId == 2)
+            sample = x10::dsp::curves::Transformer::f (driven) / driveGain;
+        else // curveId == 0 or default
+            sample = x10::dsp::curves::Tanh::f (driven) / driveGain;
+
+        output[i] += sample;
 
         phase_ += 1.0;
         envPhase_ += invHostSampleRate;
@@ -100,13 +112,13 @@ Voice* VoicePool::findFreeVoice() noexcept
     return nullptr;
 }
 
-void VoicePool::render(float* output, int numSamples, int hostSampleRate) noexcept
+void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept
 {
     std::fill(output, output + numSamples, 0.0f);
 
     for (auto& voice : voices_)
         if (voice.isActive())
-            voice.render(output, numSamples, hostSampleRate);
+            voice.render(output, numSamples, hostSampleRate, driveDb, curveId);
 }
 
 } // namespace aod

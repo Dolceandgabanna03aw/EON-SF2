@@ -2,6 +2,7 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <x10/instrument/RegionIndex.h>
+#include <x10/dsp/nonlinear/Curves.h>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -26,7 +27,7 @@ public:
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
 
-    void render(float* output, int numSamples, int hostSampleRate) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -49,7 +50,7 @@ public:
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
-    void render(float* output, int numSamples, int hostSampleRate) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId) noexcept;
 
 private:
     std::vector<Voice> voices_;
