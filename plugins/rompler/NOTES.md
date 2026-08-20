@@ -64,3 +64,47 @@ ends deterministic and on the main thread. Verified over 20 consecutive runs.
 Worth noting because the failure only appeared through ctest at first and passed
 when the test was run alone — the kind of flake that gets dismissed as
 environmental.
+
+## Four things that only broke once the build left macOS
+
+Everything above was established on macOS with clang. The first build on Linux
+with GCC 13 failed four times in a row, each for a different reason, and none of
+them were visible on the original machine. Recording them because "it builds"
+had quietly meant "it builds here".
+
+**`-Wshadow` is stricter about inherited members.** A local named `flags` inside
+`openSoundFontChooser` collided with `juce::Component::flags`, which is private
+and therefore inaccessible — GCC reports it anyway, clang does not. Renamed to
+`chooserFlags`.
+
+**Overriding one `processBlock` hides the other.** GCC's
+`-Woverloaded-virtual=` fires on the `AudioBuffer<double>` overload being hidden
+by our `AudioBuffer<float>` override; clang's version of the warning does not.
+A `using juce::AudioProcessor::processBlock;` brings it back into scope without
+changing what a host sees.
+
+**Static libraries need `POSITION_INDEPENDENT_CODE` to enter a VST3.** The VST3
+is a shared module, and ELF linkers refuse non-PIC objects inside one:
+`relocation R_X86_64_TPOFF32 ... can not be used when making a shared object`.
+Mach-O has no equivalent complaint because everything there is already PIC, so
+`x10_instrument` and `x10_sf2` linked fine on macOS and nowhere else. The
+property is now set on both.
+
+**Naming a font family that is not installed draws nothing at all.** This was
+the expensive one, because it is silent: the plugin ran, the window opened, and
+every knob, section and switch was simply unlabelled. `labelFont()` asked for
+"Arial Narrow", which ships with macOS and with MS Office and essentially
+nowhere else. JUCE does not substitute a readable face for a missing family —
+the text just does not appear, and nothing is logged. Only `labelFont` was
+affected; `lcdFont` went through `getDefaultMonospacedFontName()` and kept
+rendering, which is why the values under the knobs were visible and the names
+above them were not.
+
+`labelFont` now resolves against `Font::findAllTypefaceNames()` through a list
+of condensed candidates and falls back to the default sans if none are present.
+Resolved once in a function-local static — the enumeration touches fontconfig
+and is far too slow to repeat inside `paint()`.
+
+The general lesson: a missing font is not a build error, not a runtime error and
+not a log line. It is a blank rectangle that looks like a layout bug. Any face
+named by string needs an explicit fallback chain behind it.

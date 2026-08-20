@@ -68,10 +68,12 @@ void RomplerEditor::openSoundFontChooser()
                                                     juce::File{},
                                                     "*.sf2");
 
-    const auto flags = juce::FileBrowserComponent::openMode
-                     | juce::FileBrowserComponent::canSelectFiles;
+    // Not named `flags`: juce::Component carries an inherited member of that
+    // name, and GCC's -Wshadow reports the collision even though it is private.
+    const auto chooserFlags = juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles;
 
-    chooser_->launchAsync (flags, [this] (const juce::FileChooser& fc)
+    chooser_->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
     {
         const auto file = fc.getResult();
 

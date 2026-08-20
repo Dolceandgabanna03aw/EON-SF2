@@ -46,10 +46,45 @@ inline const juce::Colour ledHot         { 0xffffb454 };
 inline const juce::Colour ledMint        { 0xff7fe0c4 };
 inline const juce::Colour ledOff         { 0xff2a2e28 };
 
+/**
+    The condensed family to silkscreen labels in, chosen from what is installed.
+
+    Naming a face outright is not safe here. "Arial Narrow" ships with macOS and
+    with Microsoft Office, and essentially nowhere else — on a machine without
+    it every label drawn through labelFont() came out blank, so the panel showed
+    knobs and values with nothing naming them. A missing family does not fall
+    back to a readable face on its own, so the fallback is made explicit.
+
+    Resolved once. findAllTypefaceNames() enumerates the system's fonts, which
+    is far too slow to repeat inside paint(). Only the message thread paints, so
+    the lazy init needs no lock beyond the one the language already guarantees.
+*/
+[[nodiscard]] inline const juce::String& condensedFamily()
+{
+    static const juce::String resolved = []() -> juce::String
+    {
+        const auto installed = juce::Font::findAllTypefaceNames();
+
+        for (const auto* candidate : { "Arial Narrow",           // macOS, MS Office
+                                       "Liberation Sans Narrow", // common on Linux
+                                       "Nimbus Sans Narrow",     // urw-base35, Linux
+                                       "Roboto Condensed",
+                                       "DejaVu Sans Condensed" })
+            if (installed.contains (candidate))
+                return candidate;
+
+        // Wider than intended, but present everywhere and readable, which beats
+        // a label that does not draw.
+        return juce::Font::getDefaultSansSerifFontName();
+    }();
+
+    return resolved;
+}
+
 /** Condensed sans for silkscreened panel labels. */
 [[nodiscard]] inline juce::Font labelFont (float height, bool boldFace = true)
 {
-    return juce::Font (juce::FontOptions ("Arial Narrow", height,
+    return juce::Font (juce::FontOptions (condensedFamily(), height,
                                           boldFace ? juce::Font::bold : juce::Font::plain));
 }
 
