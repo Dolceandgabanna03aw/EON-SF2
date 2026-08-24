@@ -84,6 +84,28 @@ void ParameterChoiceControl::resized()
 // RomplerEditor
 // ============================================================================
 
+namespace layout
+{
+// resized() and the constructor's setSize() have to agree on these. They were
+// duplicated as literals and drifted: setSize() budgeted 60px for the header
+// where the layout actually spends 88, so the window opened 28px short and the
+// last control row (Mix) was clipped off the bottom edge.
+constexpr int margin        = 8;
+constexpr int headerRow     = 28;  // the load-button row, and the preset box
+constexpr int gap           = 8;
+constexpr int controlHeight = 40;
+constexpr int width         = 440;
+
+[[nodiscard]] constexpr int heightFor (int numControls) noexcept
+{
+    return margin                       // top
+         + headerRow + gap              // load button row
+         + headerRow + gap              // preset box
+         + numControls * controlHeight
+         + margin;                      // bottom
+}
+} // namespace layout
+
 RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     : juce::AudioProcessorEditor (processorRef),
       processor_ (processorRef)
@@ -130,7 +152,8 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     for (auto& ctrl : paramControls_)
         addAndMakeVisible (*ctrl);
 
-    setSize (440, 60 + 11 * 40);
+    setSize (layout::width,
+             layout::heightFor (static_cast<int> (paramControls_.size())));
 }
 
 RomplerEditor::~RomplerEditor()
@@ -145,21 +168,21 @@ void RomplerEditor::paint (juce::Graphics& g)
 
 void RomplerEditor::resized()
 {
-    auto bounds = getLocalBounds().reduced (8);
+    auto bounds = getLocalBounds().reduced (layout::margin);
 
-    auto topRow = bounds.removeFromTop (28);
+    auto topRow = bounds.removeFromTop (layout::headerRow);
     loadButton_.setBounds (topRow.removeFromLeft (140));
-    topRow.removeFromLeft (8);
+    topRow.removeFromLeft (layout::gap);
     fileLabel_.setBounds (topRow);
 
-    bounds.removeFromTop (8);
-    presetBox_.setBounds (bounds.removeFromTop (28));
+    bounds.removeFromTop (layout::gap);
+    presetBox_.setBounds (bounds.removeFromTop (layout::headerRow));
 
-    bounds.removeFromTop (8);
+    bounds.removeFromTop (layout::gap);
     for (auto& ctrl : paramControls_)
     {
         if (ctrl)
-            ctrl->setBounds (bounds.removeFromTop (40));
+            ctrl->setBounds (bounds.removeFromTop (layout::controlHeight));
     }
 }
 
