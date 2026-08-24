@@ -15,3 +15,8 @@ add_library(x10::instrument ALIAS x10_instrument)
 target_include_directories(x10_instrument PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(x10_instrument PUBLIC cxx_std_20)
 target_link_libraries(x10_instrument PRIVATE x10::strict)
+
+# This archive is linked into the VST3 shared module. ELF toolchains refuse to
+# pull non-PIC objects into a shared object, so the link fails on Linux with a
+# relocation error. macOS never shows it: everything there is PIC already.
+set_target_properties(x10_instrument PROPERTIES POSITION_INDEPENDENT_CODE ON)

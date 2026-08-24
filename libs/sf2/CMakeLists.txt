@@ -18,3 +18,7 @@ target_compile_features(x10_sf2 PUBLIC cxx_std_20)
 # The Region schema is public: callers of flatten() receive them.
 target_link_libraries(x10_sf2 PUBLIC x10::instrument)
 target_link_libraries(x10_sf2 PRIVATE x10::strict)
+
+# Same reason as x10_instrument: this archive ends up inside the VST3 shared
+# module, and a non-PIC object cannot be linked into one on ELF platforms.
+set_target_properties(x10_sf2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
