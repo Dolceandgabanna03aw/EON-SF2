@@ -185,7 +185,7 @@ void Switch::paint (juce::Graphics& g)
         {
             auto r = juce::Rectangle<float> (pad + i * (ledW + gap), ledY, ledW, ledH);
             const auto colour = (i == n - 1) ? theme::ledRed
-                             : (i >= n - 3) ? theme::ledHot
+                             : (i == n - 2) ? theme::ledHot
                                             : theme::ledMint;
             g.setColour (colour);
             g.fillRoundedRectangle (r, 2.0f);
