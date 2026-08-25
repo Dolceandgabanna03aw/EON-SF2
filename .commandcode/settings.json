@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(python3 -c  from PIL import Image im = Image.open('outputs/eon_ui_offscreen.png').convert('RGB') W,H = im.size px = im.load() def sim(a,b,t=12): return abs(a[0]-b[0])<=t and abs(a[1]-b[1])<=t and abs(a[2]-b[2])<=t # knob cream (0xf2ecd8) circles - find clusters # scan for cream pixels from collections import defaultdict rows = defaultdict(list) for y in range(H): x = 0 while x < W: if sim(px[x,y], (0xf2,0xec,0xd8), 6): x0 = x while x < W and sim(px[x,y], (0xf2,0xec,0xd8), 6): x += 1 if x - x0 >= 4: rows[y].append((x0, x-1)) x = x - 1 if False else x else: x += 1 # print bands of cream (y ranges where cream appears continuously) ys = sorted(rows) bands = [] start = None for i,y in enumerate(ys): if start is None: start = y if i+1 < len(ys) and ys[i+1] - y <= 3: continue bands.append((start, y)) start = None print('cream y-bands:', bands) for y in [100, 110, 115, 120, 125, 130, 140, 150, 160, 170]: if y in rows: print(' y', y, rows[y][:6])  2 >& 1)",
+      "Shell(python3 -c  from PIL import Image im = Image.open('outputs/eon_ui_offscreen.png').convert('RGB') W,H = im.size px = im.load() def sim(a,b,t=12): return abs(a[0]-b[0])<=t and abs(a[1]-b[1])<=t and abs(a[2]-b[2])<=t # find all distinct-ish colors and their bbox clusters for the whole image from collections import defaultdict # sample every 4 px, cluster non-bg, non-panel colors colors = defaultdict(int) for y in range(0, H, 4): for x in range(0, W, 4): c = px[x,y] colors[c] += 1 top = sorted(colors.items(), key=lambda kv: -kv[1])[:25] for c,n in top: print('#%02x%02x%02x' % c, n) )",
+      "Shell(find:*)",
+      "Shell(awk:*)",
+      "Shell(ctest:*)",
+      "Shell(git:*)",
+      "Shell(grep:*)",
+      "Shell(rm:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

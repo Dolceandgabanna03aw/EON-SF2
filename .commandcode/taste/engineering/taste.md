@@ -1,0 +1,11 @@
+# Engineering preferences
+
+- Treats compiler warnings as errors (Gate 1: "경고 = 에러") — warnings block progression. Confidence: 0.8
+- Prefers objective numeric measurements (JSON metrics from offline renders/FFT, pixel-coordinate analysis of screenshots) over image/visual-based analysis (e.g., VLM/vision reading) for verification — applied to both audio and UI layout checks; vision findings are treated as hypotheses to confirm with measured data (e.g., corrected a vision false positive about knob alignment via pixel analysis). Confidence: 0.8
+- Wants blocking milestone gates: work advances to the next stage only after all acceptance criteria pass. Confidence: 0.7
+- Wants the verification loop itself validated by deliberately injecting known regressions (e.g., naive hard-clipping) to confirm the detectors actually catch failures. Confidence: 0.6
+- Prefers keeping existing infrastructure and making it work properly rather than applying quick fixes or workarounds, and verifying fixes in the real target environment (e.g., codex cli) rather than assuming. Confidence: 0.6
+- Prefers writing deterministic DSP unit tests that feed synthetic sample data directly into internal classes (e.g., VoicePool via Sampler.h) rather than relying on external data-file/corpus dependencies — so tests run reliably anywhere and are side-effect free. Confidence: 0.6
+- Prefers agent definition files (system prompts/descriptions) written in Korean — rewrote the code-reviewer agent's prompt to Korean to match the project's language. Confidence: 0.9
+- Expects newly implemented features to be covered by unit tests — when the agent noted that the new SF2 loop-playback behavior had no tests yet and offered to add them, the user approved immediately with a single word "추가해" (add them). Confidence: 0.7
+- Wants new DSP/audio code verified under sanitizer builds (ASan) in addition to the normal test suite — approved running the new loop tests in `build-asan` with a terse "1" after the agent flagged it as useful for catching out-of-bounds access at loop boundaries, and then chose to set up a dedicated ASan build that includes plugin tests so the plugin suite also gets sanitizer coverage. Confidence: 0.7

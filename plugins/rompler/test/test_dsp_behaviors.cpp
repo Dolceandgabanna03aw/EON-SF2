@@ -191,6 +191,92 @@ TEST_CASE ("a saturated pool steals the longest-held voice for a new note", "[ds
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
+TEST_CASE ("a looping sample keeps sounding past its end", "[dsp][voice][loop]")
+{
+    aod::Sample sample = makeTone();
+    // Loop the whole 1 s tone back to its head. A non-looping voice would run
+    // off the end and go silent within the first second of playback; a looping
+    // voice must still be sounding well past that.
+    sample.loopStart   = 0;
+    sample.loopEnd     = static_cast<int> (sample.data.size()) - 1;
+    sample.loopEnabled = true;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 0.8f);
+
+    // Play far past the sample length: 3 s of audio > 1 s sample.
+    float lastPeak = 0.0f;
+    for (int b = 0; b < 3 * kSampleRate / kBlockSize; ++b)
+    {
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        lastPeak = blockPeak (block.data(), kBlockSize);
+        REQUIRE (lastPeak > 0.0f); // never dies out while held
+    }
+}
+
+TEST_CASE ("a non-looping sample goes silent once it ends", "[dsp][voice][loop]")
+{
+    aod::Sample sample = makeTone();
+    // No loop points: the classic one-shot behaviour must be preserved.
+    sample.loopEnabled = false;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 0.8f);
+
+    // The 1 s sample must have ended well before 2 s of playback.
+    bool wentSilent = false;
+    for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
+    {
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        if (blockPeak (block.data(), kBlockSize) <= 1.0e-6f)
+        {
+            wentSilent = true;
+            break;
+        }
+    }
+    REQUIRE (wentSilent);
+}
+
+TEST_CASE ("release on a looping sample fades out instead of restarting the loop", "[dsp][voice][loop]")
+{
+    aod::Sample sample = makeTone();
+    sample.loopStart   = 0;
+    sample.loopEnd     = static_cast<int> (sample.data.size()) - 1;
+    sample.loopEnabled = true;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 0.8f);
+
+    // Let it loop for a while, then release.
+    for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
+    {
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    }
+    pool.stop (60);
+
+    // The release fade must run to zero monotonically; the loop must not
+    // re-engage and keep it ringing forever.
+    float lastPeak = 1.0f;
+    bool hitZero = false;
+    for (int b = 0; b < 32; ++b)
+    {
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        const float p = blockPeak (block.data(), kBlockSize);
+        REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
+        lastPeak = p;
+        if (p <= 1.0e-6f)
+        {
+            hitZero = true;
+            break;
+        }
+    }
+    REQUIRE (hitZero);
+}
+
 TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[dsp][voice]")
 {
     aod::Sample sample;
