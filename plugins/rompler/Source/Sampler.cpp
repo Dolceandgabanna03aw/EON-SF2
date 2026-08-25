@@ -264,10 +264,21 @@ float Voice::nextSample() noexcept
         // neighbour, so the loop cannot be allowed to land on it.
         const auto loopEnd = juce::jmin (static_cast<double> (sample_->loopEnd),
                                          static_cast<double> (sampleCount - 1));
-        const auto loopLength = static_cast<double> (sample_->loopEnd - sample_->loopStart);
+        // Clamping can collapse an out-of-range loop down to loopStart or
+        // below; there is nothing left to wrap in that case, and a zero or
+        // negative length would spin the wrap forever. Fall through so the
+        // end-of-data check below deactivates the voice instead.
+        if (loopEnd > static_cast<double> (sample_->loopStart))
+        {
+            // The length must be measured from the same clamped end the wrap
+            // uses. Using the raw loopEnd here lets a loop that ends on the
+            // last frame wrap phase_ past loopStart and negative, which turns
+            // into a huge index on the way into the interpolator below.
+            const auto loopLength = loopEnd - static_cast<double> (sample_->loopStart);
 
-        while (phase_ >= loopEnd)
-            phase_ -= loopLength;
+            while (phase_ >= loopEnd)
+                phase_ -= loopLength;
+        }
     }
 
     if (phase_ >= static_cast<double> (sampleCount - 1))

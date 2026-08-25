@@ -66,6 +66,14 @@ struct Scratch
             peak = std::max (peak, std::abs (value));
         return peak;
     }
+
+    [[nodiscard]] bool allFinite() const
+    {
+        for (float value : wetLeft)
+            if (! std::isfinite (value))
+                return false;
+        return true;
+    }
 };
 
 /** Renders until the voice frees itself, returning how many samples that took. */
@@ -141,11 +149,27 @@ TEST_CASE ("a looping region keeps sounding past the end of its data", "[voice][
 
     Scratch scratch;
 
+    float peak = 0.0f;
+    bool allFinite = true;
+
     for (int block = 0; block < 200; ++block) // ~12800 samples, six times the data
+    {
         scratch.render (voice, settings);
+
+        peak = std::max (peak, scratch.wetPeak());
+        allFinite = allFinite && scratch.allFinite();
+    }
 
     REQUIRE (voice.isActive());
     REQUIRE (scratch.wetPeak() > 0.0f);
+
+    // A loop that ends on the last frame must wrap cleanly back to its start.
+    // If the wrap order is wrong the phase goes negative, the interpolator
+    // reads a huge out-of-bounds index, and the stream spikes or goes NaN.
+    // The peak therefore has to stay in the same sane range the non-looping
+    // drive test uses, and every sample has to be a real number.
+    REQUIRE (allFinite);
+    REQUIRE (peak < 1.5f);
 }
 
 TEST_CASE ("note-off releases rather than cutting the voice off", "[voice][dsp]")
