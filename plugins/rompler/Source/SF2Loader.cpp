@@ -67,6 +67,9 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
             sample.filterCutoffHz = region.filterCutoffHz;
             sample.filterResonanceDb = region.filterResonanceDb;
+            sample.rootKey = region.rootKey;
+            sample.tuneCents = region.tuneCents;
+            sample.scaleTuningCentsPerKey = region.scaleTuningCentsPerKey;
 
             resampleToHostRate(sample);
 

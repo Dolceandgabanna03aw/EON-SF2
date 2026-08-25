@@ -24,6 +24,15 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     loopStart_ = sample->loopStart;
     loopEnd_   = sample->loopEnd;
     loopEnabled_ = sample->loopEnabled && loopEnd_ > loopStart_ + 1;
+
+    // Pitch: the sample is recorded at rootKey. A note played N semitones above
+    // rootKey must advance N semitones faster (pitch ratio 2^(N/12)); the
+    // region's per-key scale (usually 100 cents/key) and constant tune offset
+    // are folded in so a scale of 0 pins every note to the root pitch.
+    const double semitones = static_cast<double> (midiNote - sample->rootKey)
+        * static_cast<double> (sample->scaleTuningCentsPerKey) / 100.0
+        + static_cast<double> (sample->tuneCents) / 100.0;
+    playRate_ = std::pow (2.0, semitones / 12.0);
 }
 
 void Voice::stop() noexcept
@@ -162,7 +171,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         output[i] += sample;
 
-        phase_ += 1.0;
+        phase_ += playRate_;
 
         // Wrap the loop: once the read position passes loopEnd_, continue from
         // loopStart_ keeping the fractional part, so the interpolation phase is

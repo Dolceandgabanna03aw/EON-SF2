@@ -21,6 +21,12 @@ struct Sample
     bool loopEnabled = false;
     float filterCutoffHz = 19912.13f;
     float filterResonanceDb = 0.0f;
+    // Pitch mapping: the sample plays back untransposed when the played MIDI
+    // note equals rootKey. tuneCents is a constant offset; scaleTuningCentsPerKey
+    // is the per-key pitch step (100 = normal chromatic, 0 = pinned to rootKey).
+    float rootKey = 60.0f;
+    float tuneCents = 0.0f;
+    float scaleTuningCentsPerKey = 100.0f;
 };
 
 class Voice
@@ -60,6 +66,11 @@ private:
     int loopStart_ = 0;
     int loopEnd_ = 0;
     bool loopEnabled_ = false;
+
+    // Playback rate in source frames per output sample. 1.0 plays the sample at
+    // its recorded pitch; a higher MIDI note advances faster, a lower one
+    // slower. Computed once at start() from the note, rootKey and tunings.
+    double playRate_ = 1.0;
 
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;

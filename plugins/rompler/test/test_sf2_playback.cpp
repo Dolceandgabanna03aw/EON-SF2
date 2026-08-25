@@ -3,6 +3,8 @@
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
 
+#include <cmath>
+
 namespace
 {
 constexpr double kSampleRate = 48000.0;
@@ -63,4 +65,61 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
         peak = std::max (peak, buffer.getMagnitude (ch, 0, kBlockSize));
 
     REQUIRE (peak > 0.0f);
+}
+
+TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (testSf2File()));
+    const auto [bank, program] = loader.firstPresetProgram();
+
+    // Find a key that resolves a sample so we can measure its playback pitch.
+    aod::Sample* sample = nullptr;
+    for (int key = 0; key < 128; ++key)
+    {
+        sample = loader.getSample (bank, program, key, 100);
+        if (sample != nullptr)
+            break;
+    }
+    REQUIRE (sample != nullptr);
+    REQUIRE (! sample->data.empty());
+
+    // A note 12 semitones above the root must advance exactly twice as fast
+    // (2^(12/12) = 2) when the region uses normal chromatic tuning.
+    const double expectedRatio = std::pow (2.0, sample->scaleTuningCentsPerKey / 100.0);
+    REQUIRE (expectedRatio > 1.5);
+
+    const int noteA = juce::jlimit (0, 115, static_cast<int> (std::lround (sample->rootKey)));
+    const int noteB = noteA + 12;
+
+    auto zeroCrossings = [] (aod::Sample* s, int note, int blockSize)
+    {
+        aod::VoicePool pool (1);
+        pool.start (s, note, 100.0f / 127.0f);
+        juce::AudioBuffer<float> buf (1, blockSize);
+        pool.render (buf.getWritePointer (0), blockSize, static_cast<int> (kSampleRate),
+                     0.0f, 0.0f, 0, 0, 0.0f);
+
+        int crossings = 0;
+        for (int i = 1; i < blockSize; ++i)
+        {
+            const float a = buf.getSample (0, i - 1);
+            const float b = buf.getSample (0, i);
+            if ((a < 0.0f && b >= 0.0f) || (a >= 0.0f && b < 0.0f))
+                ++crossings;
+        }
+        return crossings;
+    };
+
+    constexpr int kBigBlock = 8192;
+    const int zcA = zeroCrossings (sample, noteA, kBigBlock);
+    const int zcB = zeroCrossings (sample, noteB, kBigBlock);
+
+    REQUIRE (zcA > 20); // the sample must actually oscillate
+    REQUIRE (zcB > 20);
+    const double ratio = static_cast<double> (zcB) / static_cast<double> (zcA);
+    REQUIRE (std::abs (ratio - expectedRatio) < 0.2);
 }
