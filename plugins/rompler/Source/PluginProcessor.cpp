@@ -109,15 +109,21 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
     const auto curveParam = apvts_.getRawParameterValue(ParamIDs::voiceCurve);
+    const auto velToDriveParam = apvts_.getRawParameterValue(ParamIDs::voiceVelToDrive);
     const auto filterRoutingParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterRouting);
     const auto filterOffsetParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterOffset);
+    const auto polyLimitParam = apvts_.getRawParameterValue(ParamIDs::polyLimit);
     const float driveDb = driveParam ? driveParam->load() : 0.0f;
     const int curveId = curveParam ? static_cast<int>(curveParam->load()) : 0;
+    const float velToDriveDb = velToDriveParam ? velToDriveParam->load() : 0.0f;
     const int filterRouting = filterRoutingParam ? static_cast<int>(filterRoutingParam->load()) : 0;
     const float filterOffsetCents = filterOffsetParam ? filterOffsetParam->load() : 0.0f;
 
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, curveId,
-                        filterRouting, filterOffsetCents);
+    if (polyLimitParam)
+        voicePool_->setPolyphony (static_cast<int> (polyLimitParam->load()));
+
+    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, velToDriveDb,
+                        curveId, filterRouting, filterOffsetCents);
 
     if (buffer.getNumChannels() > 1)
     {
@@ -148,10 +154,12 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                           reverbMixP   ? reverbMixP->load()   / 100.0f : 0.2f);
 
     const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
+    const auto outMixParam = apvts_.getRawParameterValue(ParamIDs::outMix);
     const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;
     const float outTrimGain = std::pow(10.0f, outTrimDb / 20.0f);
+    const float outMixGain = outMixParam ? outMixParam->load() / 100.0f : 1.0f;
 
-    buffer.applyGain(outTrimGain);
+    buffer.applyGain(outTrimGain * outMixGain);
 
     lastPeak_.store (buffer.getMagnitude (0, numSamples), std::memory_order_relaxed);
 }

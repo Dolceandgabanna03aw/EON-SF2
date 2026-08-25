@@ -26,12 +26,18 @@ struct Sample
 class Voice
 {
 public:
+    /** Short fade-out time used by the attack stage when a key is released during it. */
+    static constexpr float releaseTime = 0.08f;
+
     void start(const Sample* sample, float velocity) noexcept;
+    /** Starts a short release fade; the voice deactivates itself once it reaches zero. */
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
+    /** True while fading out from a note-off, before the slot is retired. */
+    [[nodiscard]] bool isReleasing() const noexcept { return active_ && releasing_; }
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
-                int filterRouting, float filterOffsetCents) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+                int curveId, int filterRouting, float filterOffsetCents) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -39,6 +45,9 @@ private:
     float velocity_ = 0.0f;
     bool active_ = false;
     float envPhase_ = 0.0f;
+    bool releasing_ = false;
+    float releaseLevel_ = 0.0f;
+    float releasePhase_ = 0.0f;
 
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
@@ -54,16 +63,20 @@ public:
 
     explicit VoicePool(int numVoices = maxVoices) : voices_(static_cast<std::size_t>(numVoices)) {}
 
+    /** Caps the number of concurrently playing voices. Call from the audio thread. */
+    void setPolyphony(int numVoices) noexcept;
+
     void start(const Sample* sample, int midiNote, float velocity) noexcept;
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, int curveId,
-                int filterRouting, float filterOffsetCents) noexcept;
+    void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+                int curveId, int filterRouting, float filterOffsetCents) noexcept;
 
 private:
     std::vector<Voice> voices_;
     std::array<int, 128> noteToVoice_ {};
+    int polyphony_ = static_cast<int>(voices_.size());
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;
 };
