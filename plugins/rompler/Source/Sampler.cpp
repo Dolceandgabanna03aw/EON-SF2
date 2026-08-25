@@ -16,6 +16,14 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     releasing_ = false;
     releaseLevel_ = 0.0f;
     filterNeedsPrepare_ = true;
+
+    // Copy loop points at start(): render() must not read through a sample
+    // pointer that may belong to a retired loader once this voice is retriggered
+    // against a newer one. Keeping the loop state here makes the audio thread
+    // self-contained for the voice's lifetime.
+    loopStart_ = sample->loopStart;
+    loopEnd_   = sample->loopEnd;
+    loopEnabled_ = sample->loopEnabled && loopEnd_ > loopStart_ + 1;
 }
 
 void Voice::stop() noexcept
@@ -81,18 +89,44 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const float velDriveDb = driveDb + velToDriveDb * (velocity_ - 1.0f);
     const float driveGain = std::pow (10.0f, velDriveDb / 20.0f);
 
+    // Loop points as sample-frame indices into sampleData. While looping, phase_
+    // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
+    // the end of the sample; releasing ignores the loop and plays the tail out
+    // past loopEnd_ so the release envelope has real data to fade.
+    const bool looping = loopEnabled_ && !releasing_;
+    const auto loopStart = static_cast<std::int64_t>(loopStart_);
+    const auto loopEnd = static_cast<std::int64_t>(loopEnd_);
+
     for (int i = 0; i < numSamples; ++i)
     {
-        const auto index = static_cast<std::int64_t>(phase_);
-        if (index >= sampleCount - 1)
+        if (!looping)
         {
-            active_ = false;
-            break;
+            const auto index = static_cast<std::int64_t>(phase_);
+            if (index >= sampleCount - 1)
+            {
+                if (releasing_)
+                {
+                    // While releasing, hold the last sample position instead of
+                    // falling off the end of the buffer: the fade must run to
+                    // zero on its own, or the waveform is truncated mid-cycle
+                    // and clicks.
+                    phase_ = static_cast<double>(sampleCount - 1);
+                }
+                else
+                {
+                    active_ = false;
+                    break;
+                }
+            }
         }
 
+        const auto index = static_cast<std::int64_t>(phase_);
         const float frac = static_cast<float>(phase_ - static_cast<double>(index));
         const float s0 = sampleData[static_cast<std::size_t>(index)];
-        const float s1 = sampleData[static_cast<std::size_t>(index) + 1];
+        // Reading s1 needs one sample of headroom; a releasing voice holds
+        // phase_ at sampleCount - 1, so clamp here to stay in bounds.
+        const auto s1Index = (index + 1 < sampleCount) ? index + 1 : sampleCount - 1;
+        const float s1 = sampleData[static_cast<std::size_t>(s1Index)];
         const float interpolated = s0 + frac * (s1 - s0);
 
         float sample = interpolated * velocity_ * envelope();
@@ -123,6 +157,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         output[i] += sample;
 
         phase_ += 1.0;
+
+        // Wrap the loop: once the read position passes loopEnd_, continue from
+        // loopStart_ keeping the fractional part, so the interpolation phase is
+        // continuous across the wrap and the loop does not click.
+        if (looping && phase_ >= static_cast<double>(loopEnd))
+            phase_ -= static_cast<double>(loopEnd - loopStart);
+
         envPhase_ += invHostSampleRate;
     }
 }
@@ -194,7 +235,16 @@ Voice* VoicePool::findFreeVoice() noexcept
         if (voices_[i].isReleasing())
             return &voices_[i];
 
-    return nullptr;
+    // Third pass: the whole pool is busy with sustained notes. Steal the
+    // *oldest* active voice so the new note is never silently dropped; the
+    // oldest has decayed the furthest, so it is the least audible victim.
+    // (Voice::start() rewrites all state, so the steal is click-free apart
+    // from the natural note cut.)
+    std::size_t oldest = 0;
+    for (std::size_t i = 1; i < limit; ++i)
+        if (voices_[i].isActive())
+            oldest = i;
+    return &voices_[oldest];
 }
 
 void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,

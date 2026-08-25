@@ -37,6 +37,8 @@ public:
     [[nodiscard]] bool isReleasing() const noexcept { return active_ && releasing_; }
     /** The note this voice is currently sounding (or -1 once it has no note). */
     [[nodiscard]] int note() const noexcept { return midiNote_; }
+    /** How far the envelope has run; used to pick the oldest voice when stealing. */
+    [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
@@ -51,6 +53,13 @@ private:
     bool releasing_ = false;
     float releaseLevel_ = 0.0f;
     float releasePhase_ = 0.0f;
+
+    // Loop state: while looping (not releasing), phase_ wraps back to
+    // loopStart_ once it passes loopEnd_. Cleared by start() so a retriggered
+    // voice always begins from the sample head.
+    int loopStart_ = 0;
+    int loopEnd_ = 0;
+    bool loopEnabled_ = false;
 
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
