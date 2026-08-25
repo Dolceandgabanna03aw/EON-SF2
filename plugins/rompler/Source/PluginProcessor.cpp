@@ -31,6 +31,19 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
 
 void RomplerProcessor::releaseResources()
 {
+    // The audio thread is guaranteed stopped here, so it is safe to retire
+    // the loaders: processBlock() can no longer read activeLoader_ between
+    // this store and the vector push below. Leaving the pointer set would
+    // hand processBlock() a dangling reference if the host restarts audio
+    // without a fresh prepareToPlay().
+    //
+    // The loader stays alive in retiredLoaders_ (never deleted here): voices
+    // may still hold const Sample* into its sample map, and the pool is only
+    // cleared after this, so no sample pointer outlives its owner.
+    activeLoader_.store (nullptr, std::memory_order_relaxed);
+    if (sf2Loader_)
+        retiredLoaders_.push_back (std::move (sf2Loader_));
+
     voicePool_.reset();
 }
 
@@ -227,9 +240,14 @@ void RomplerProcessor::selectPreset (int bank, int program) noexcept
 void RomplerProcessor::postNote (int note, bool on, int velocity)
 {
     const std::lock_guard lock (noteQueueMutex_);
-    if (noteQueue_.size() > 256)
-        noteQueue_.pop();
-    noteQueue_.push ({ note, on, velocity });
+
+    // When the queue is full we drop the *new* event rather than the oldest.
+    // Dropping the oldest strands a note-on without its matching note-off (or
+    // vice versa): a lost note-on leaves the note silent, but a lost note-off
+    // leaves it ringing forever. Both are dropped symmetrically here, so the
+    // worst case is a momentarily missed keypress, never a stuck note.
+    if (noteQueue_.size() < maxQueuedNotes)
+        noteQueue_.push ({ note, on, velocity });
 }
 
 } // namespace aod

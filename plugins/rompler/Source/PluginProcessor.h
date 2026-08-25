@@ -84,6 +84,9 @@ public:
     void postNote (int note, bool on, int velocity = 100);
 
 private:
+    /** Cap on buffered message-thread note events; see postNote(). */
+    static constexpr std::size_t maxQueuedNotes = 256;
+
     juce::AudioProcessorValueTreeState apvts_;
 
     // sf2Loader_ is owned and replaced only on the message thread. processBlock
