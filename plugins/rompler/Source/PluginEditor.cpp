@@ -79,7 +79,9 @@ void Knob::paint (juce::Graphics& g)
     g.drawEllipse (circle, 1.0f);
 
     // Pointer (mint on cream knobs, dark on hot knobs).
-    const float unit = static_cast<float> (slider_.getValue());
+    // slider_.getValue() is the denormalised parameter value (e.g. Drive is
+    // 0..100); the pointer angle is computed from the 0..1 normalised value.
+    const float unit = static_cast<float> (param_.convertTo0to1 (static_cast<float> (slider_.getValue())));
     const float angleRad = (juce::MathConstants<float>::pi / 180.0f) * ((unit * 264.0f) - 132.0f);
     const auto centre = circle.getCentre();
     const float r = circle.getWidth() * 0.5f - 5.0f;
