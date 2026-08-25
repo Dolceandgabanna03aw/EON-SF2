@@ -45,6 +45,22 @@ target_link_libraries(EONDS50
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
 
+# Headless UI snapshot tool. Renders the real editor offscreen to a PNG so the
+# deck can be inspected without a host window (and without Screen Recording
+# permissions, which this machine does not grant to the terminal).
+if(APPLE OR UNIX)
+    add_executable(ui_shot tools/ui_shot.cpp)
+    target_link_libraries(ui_shot PRIVATE
+        EONDS50
+        x10::dsp
+        x10::sf2
+        x10::instrument
+        juce::juce_audio_utils
+        juce::juce_dsp)
+    target_include_directories(ui_shot PRIVATE Source)
+    target_compile_options(ui_shot PRIVATE -Wall -Wextra -Wpedantic -Werror -Wshadow)
+endif()
+
 # Our own sources are held to the same bar as x10_dsp, minus the numeric
 # warnings that JUCE's own headers do not compile cleanly under.
 target_compile_options(EONDS50 PRIVATE -Wall -Wextra -Wpedantic -Werror -Wshadow)

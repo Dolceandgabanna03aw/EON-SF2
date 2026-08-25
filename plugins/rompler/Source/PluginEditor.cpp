@@ -128,11 +128,11 @@ void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetail
 // Switch (segmented buttons)
 // ============================================================================
 
-Switch::Switch (juce::AudioParameterChoice& param)
-    : param_ (param)
+Switch::Switch (juce::AudioParameterChoice& param, const juce::String& label, bool leds)
+    : param_ (param), leds_ (leds)
 {
     addAndMakeVisible (label_);
-    label_.setText (param.getName (32), juce::dontSendNotification);
+    label_.setText (label.isEmpty() ? param.getName (32).toUpperCase() : label, juce::dontSendNotification);
     label_.setJustificationType (juce::Justification::centred);
     label_.setColour (juce::Label::textColourId, theme::ink);
     label_.setFont (makeFont (9.5f, true));
@@ -140,80 +140,112 @@ Switch::Switch (juce::AudioParameterChoice& param)
     for (const auto& choice : param.getAllValueStrings())
         box_.addItem (choice, box_.getNumItems() + 1);
     attachment_ = std::make_unique<juce::ComboBoxParameterAttachment> (param, box_);
-    rebuildSegments();
 
-    setSize (150, 70);
+    setSize (110, 64);
 }
 
 Switch::~Switch() = default;
 
-void Switch::rebuildSegments()
-{
-    segments_.clear();
-    numSegments_ = box_.getNumItems();
-    if (numSegments_ == 0)
-        return;
-    const float w = (float) getWidth() - 16.0f;
-    const float segW = w / (float) numSegments_;
-    for (int i = 0; i < numSegments_; ++i)
-        segments_.emplace_back (8 + (int) (i * segW), 22, (int) segW, 22);
-}
-
 void Switch::resized()
 {
     const auto w = getWidth();
-    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (0));
-    rebuildSegments();
+    const int pillW = juce::jlimit (48, w - 8, 96);
+    const int top = leds_ ? 2 : 4;
+    pill_ = juce::Rectangle<int> (0, top, pillW, leds_ ? 20 : 24).withX ((w - pillW) / 2);
+    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 2 : 4)));
+}
+
+void Switch::advanceChoice()
+{
+    const int n = box_.getNumItems();
+    if (n <= 1)
+        return;
+    const int cur = box_.getSelectedId();
+    box_.setSelectedId (cur >= n ? 1 : cur + 1, juce::sendNotificationSync);
+    repaint();
 }
 
 void Switch::paint (juce::Graphics& g)
 {
-    const auto b = getLocalBounds().toFloat();
-    g.setColour (juce::Colour (0x1f000000));
-    g.fillRoundedRectangle (b.withTrimmedLeft (8).withTrimmedRight (8).withTop (22).withHeight (22), 4.0f);
+    auto b = pill_.toFloat();
+    g.setColour (theme::displayBg);
+    g.fillRoundedRectangle (b, 5.0f);
+    g.setColour (juce::Colour (0x33000000));
+    g.drawRoundedRectangle (b, 5.0f, 1.0f);
 
-    for (int i = 0; i < numSegments_; ++i)
+    if (leds_)
     {
-        auto seg = segments_[static_cast<std::size_t> (i)].toFloat().reduced (1.5f);
-        const bool active = (box_.getSelectedItemIndex() == i);
-        if (active)
+        const int n = 5;
+        const float gap = 3.0f;
+        const float pad = 8.0f;
+        const float ledW = (getWidth() - 2 * pad - gap * (n - 1)) / (float) n;
+        const float ledH = 16.0f;
+        const float ledY = b.getBottom() + 4.0f;
+        for (int i = 0; i < n; ++i)
         {
-            g.setGradientFill (juce::ColourGradient (theme::mint, seg.getTopLeft(),
-                                                     theme::mintDeep, seg.getBottomLeft(), false));
-            g.fillRoundedRectangle (seg, 3.0f);
-            g.setColour (juce::Colour (0xff06231b));
+            auto r = juce::Rectangle<float> (pad + i * (ledW + gap), ledY, ledW, ledH);
+            const auto colour = (i == n - 1) ? theme::ledRed
+                             : (i >= n - 3) ? theme::ledHot
+                                            : theme::ledMint;
+            g.setColour (colour);
+            g.fillRoundedRectangle (r, 2.0f);
         }
-        else
-        {
-            g.setGradientFill (juce::ColourGradient (juce::Colour (0xfff2ecd8), seg.getTopLeft(),
-                                                     juce::Colour (0xffd3cbac), seg.getBottomLeft(), false));
-            g.fillRoundedRectangle (seg, 3.0f);
-            g.setColour (theme::inkSoft);
-        }
-        g.drawText (box_.getItemText (i + 1), seg, juce::Justification::centred);
     }
+
+    const int idx = box_.getSelectedItemIndex();
+    juce::String name = (idx >= 0 && idx + 1 <= box_.getNumItems())
+                        ? box_.getItemText (idx + 1).toUpperCase()
+                        : juce::String();
+    g.setColour (theme::mint);
+    g.setFont (makeFont (9.0f, true));
+    g.drawText (name, b, juce::Justification::centred);
 }
 
 void Switch::mouseDown (const juce::MouseEvent& e)
 {
-    for (int i = 0; i < numSegments_; ++i)
-        if (segments_[static_cast<std::size_t> (i)].contains (e.getPosition()))
-        {
-            box_.setSelectedId (i + 1, juce::sendNotificationSync);
-            repaint();
-            break;
-        }
+    lastDragY_ = e.y;
+    setMouseCursor (juce::MouseCursor::IBeamCursor);
+}
+
+void Switch::mouseUp (const juce::MouseEvent& e)
+{
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+    if (std::abs (lastDragY_ - e.y) < 5.0f)
+        advanceChoice();
+}
+
+void Switch::mouseDrag (const juce::MouseEvent& e)
+{
+    const float dy = lastDragY_ - e.y;
+    if (std::abs (dy) > 24.0f)
+    {
+        lastDragY_ = e.y;
+        advanceChoice();
+    }
+}
+
+void Switch::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    if (wheel.deltaY > 0)
+    {
+        const int n = box_.getNumItems();
+        const int cur = box_.getSelectedId();
+        box_.setSelectedId (cur <= 1 ? n : cur - 1, juce::sendNotificationSync);
+    }
+    else if (wheel.deltaY < 0)
+        advanceChoice();
+    repaint();
 }
 
 // ============================================================================
 // Toggle (2-way)
 // ============================================================================
 
-Toggle::Toggle (juce::AudioParameterChoice& param)
+Toggle::Toggle (juce::AudioParameterChoice& param, const juce::String& label)
     : param_ (param)
 {
     addAndMakeVisible (label_);
-    label_.setText (param.getName (32), juce::dontSendNotification);
+    label_.setText (label.isEmpty() ? param.getName (32).toUpperCase() : label, juce::dontSendNotification);
     label_.setJustificationType (juce::Justification::centred);
     label_.setColour (juce::Label::textColourId, theme::ink);
     label_.setFont (makeFont (9.5f, true));
@@ -222,7 +254,7 @@ Toggle::Toggle (juce::AudioParameterChoice& param)
         box_.addItem (choice, box_.getNumItems() + 1);
     attachment_ = std::make_unique<juce::ComboBoxParameterAttachment> (param, box_);
 
-    setSize (110, 70);
+    setSize (110, 64);
 }
 
 Toggle::~Toggle() = default;
@@ -230,7 +262,7 @@ Toggle::~Toggle() = default;
 void Toggle::resized()
 {
     const auto w = getWidth();
-    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (0));
+    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (32));
 }
 
 void Toggle::paint (juce::Graphics& g)
@@ -240,10 +272,10 @@ void Toggle::paint (juce::Graphics& g)
 
     const float trackW = 44.0f;
     const float trackH = 20.0f;
-    auto track = juce::Rectangle<float> ((b.getWidth() - trackW) * 0.5f, 24.0f, trackW, trackH);
+    auto track = juce::Rectangle<float> ((b.getWidth() - trackW) * 0.5f, 6.0f, trackW, trackH);
 
     const bool on = (idx == 1);
-    g.setColour (on ? theme::mintDeep : juce::Colour (0xffa49c7e));
+    g.setColour (on ? theme::mint : juce::Colour (0xffb3aa8a));
     g.fillRoundedRectangle (track, trackH * 0.5f);
     g.setColour (juce::Colour (0x40000000));
     g.drawRoundedRectangle (track, trackH * 0.5f, 1.0f);
@@ -256,8 +288,8 @@ void Toggle::paint (juce::Graphics& g)
     // Pre / Post labels either side.
     g.setColour (on ? theme::mintDeep : theme::inkSoft);
     g.setFont (makeFont (8.0f, true));
-    g.drawText ("PRE",  juce::roundToInt (track.getX()) - 30, 26, 26, 16, juce::Justification::centred);
-    g.drawText ("POST", juce::roundToInt (track.getRight()) + 4, 26, 30, 16, juce::Justification::centred);
+    g.drawText ("PRE",  juce::roundToInt (track.getX()) - 30, 8, 26, 16, juce::Justification::centred);
+    g.drawText ("POST", juce::roundToInt (track.getRight()) + 4, 8, 30, 16, juce::Justification::centred);
 }
 
 void Toggle::mouseDown (const juce::MouseEvent&)
@@ -270,11 +302,11 @@ void Toggle::mouseDown (const juce::MouseEvent&)
 // Stepper (polyphony)
 // ============================================================================
 
-Stepper::Stepper (juce::RangedAudioParameter& param)
+Stepper::Stepper (juce::RangedAudioParameter& param, const juce::String& label)
     : param_ (param)
 {
     addAndMakeVisible (label_);
-    label_.setText (param.getName (32), juce::dontSendNotification);
+    label_.setText (label.isEmpty() ? param.getName (32).toUpperCase() : label, juce::dontSendNotification);
     label_.setJustificationType (juce::Justification::centred);
     label_.setColour (juce::Label::textColourId, theme::ink);
     label_.setFont (makeFont (9.5f, true));
@@ -283,7 +315,7 @@ Stepper::Stepper (juce::RangedAudioParameter& param)
     slider_.setValue (param.getValue(), juce::dontSendNotification);
     attachment_ = std::make_unique<juce::SliderParameterAttachment> (param, slider_);
 
-    setSize (110, 70);
+    setSize (110, 64);
 }
 
 Stepper::~Stepper() = default;
@@ -291,7 +323,7 @@ Stepper::~Stepper() = default;
 void Stepper::resized()
 {
     const auto w = getWidth();
-    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (0));
+    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (36));
 }
 
 void Stepper::paint (juce::Graphics& g)
@@ -299,36 +331,35 @@ void Stepper::paint (juce::Graphics& g)
     const auto b = getLocalBounds().toFloat();
     const int value = juce::roundToInt (slider_.getValue());
 
-    auto digits = juce::Rectangle<float> ((b.getWidth() - 78.0f) * 0.5f, 22.0f, 46.0f, 28.0f);
+    auto digits = juce::Rectangle<float> ((b.getWidth() - 48.0f) * 0.5f, 2.0f, 48.0f, 28.0f);
     g.setColour (theme::displayBg);
     g.fillRoundedRectangle (digits, 3.0f);
     g.setColour (theme::mint);
-    g.setFont (makeFont (15.0f, true));
+    g.setFont (makeFont (13.0f, true));
     g.drawText (juce::String (value).paddedLeft ('0', 2), digits, juce::Justification::centred);
-
-    // Up / down arrow buttons.
-    auto arrows = juce::Rectangle<float> (digits.getRight() + 6.0f, digits.getY(), 16.0f, 28.0f);
-    const float ah = arrows.getHeight() * 0.5f - 1.0f;
-    for (int i = 0; i < 2; ++i)
-    {
-        auto btn = juce::Rectangle<float> (arrows.getX(), arrows.getY() + i * (ah + 2.0f), 16.0f, ah);
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfff2ecd8), btn.getTopLeft(),
-                                                 juce::Colour (0xffd3cbac), btn.getBottomLeft(), false));
-        g.fillRoundedRectangle (btn, 2.0f);
-        g.setColour (theme::ink);
-        g.setFont (makeFont (8.0f, true));
-        g.drawText (i == 0 ? "\u25b2" : "\u25bc", btn, juce::Justification::centred);
-    }
-    upArrow_ = arrows.toNearestInt().withHeight (juce::roundToInt (ah)).withY (juce::roundToInt (arrows.getY()));
-    downArrow_ = arrows.toNearestInt().withY (juce::roundToInt (arrows.getY()) + juce::roundToInt (ah + 2.0f)).withHeight (juce::roundToInt (ah));
 }
 
 void Stepper::mouseDown (const juce::MouseEvent& e)
 {
-    if (upArrow_.contains (e.getPosition()))
-        slider_.setValue (slider_.getValue() + 1.0, juce::sendNotificationSync);
-    else if (downArrow_.contains (e.getPosition()))
-        slider_.setValue (slider_.getValue() - 1.0, juce::sendNotificationSync);
+    lastDragY_ = e.y;
+    setMouseCursor (juce::MouseCursor::IBeamCursor);
+}
+
+void Stepper::mouseUp (const juce::MouseEvent&)
+{
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
+void Stepper::mouseDrag (const juce::MouseEvent& e)
+{
+    const float delta = (lastDragY_ - e.y) / 60.0f;
+    lastDragY_ = e.y;
+    slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
+}
+
+void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    slider_.setValue (slider_.getValue() + (float) wheel.deltaY, juce::sendNotificationSync);
     repaint();
 }
 
@@ -487,6 +518,177 @@ void Keyboard::mouseUp (const juce::MouseEvent& e)
 }
 
 // ============================================================================
+// BankBrowser
+// ============================================================================
+
+BankBrowser::BankBrowser()
+{
+    addAndMakeVisible (bankCombo_);
+    bankCombo_.setColour (juce::ComboBox::backgroundColourId, theme::displayBg);
+    bankCombo_.setColour (juce::ComboBox::textColourId, theme::mint);
+    bankCombo_.setColour (juce::ComboBox::arrowColourId, theme::mintDeep);
+    bankCombo_.setColour (juce::PopupMenu::backgroundColourId, theme::body2);
+    bankCombo_.setColour (juce::PopupMenu::textColourId, theme::knobCream);
+    bankCombo_.setColour (juce::PopupMenu::highlightedBackgroundColourId, theme::mintDeep);
+    bankCombo_.setColour (juce::PopupMenu::highlightedTextColourId, juce::Colour (0xff06231b));
+    bankCombo_.setJustificationType (juce::Justification::centred);
+    bankCombo_.setColour (juce::ComboBox::outlineColourId, theme::mintDeep);
+    bankCombo_.setColour (juce::ComboBox::buttonColourId, theme::mintDeep);
+    bankCombo_.onChange = [this]
+    {
+        const int sel = bankCombo_.getSelectedId() - 1;
+        if (sel >= 0 && sel < (int) banks_.size())
+            filterFor (banks_[static_cast<std::size_t> (sel)]);
+    };
+
+    addAndMakeVisible (list_);
+    list_.setOutlineThickness (0);
+    list_.setColour (juce::ListBox::backgroundColourId, theme::displayBg);
+    list_.setColour (juce::ListBox::outlineColourId, theme::mintDeep);
+    list_.getViewport()->setScrollBarsShown (true, false);
+    list_.getViewport()->setColour (juce::ScrollBar::backgroundColourId, juce::Colours::transparentBlack);
+    list_.getViewport()->setColour (juce::ScrollBar::trackColourId, theme::bodyEdge);
+    list_.getViewport()->setColour (juce::ScrollBar::thumbColourId, theme::mintDeep);
+    list_.setRowHeight (24);
+
+    addAndMakeVisible (emptyHint_);
+    emptyHint_.setJustificationType (juce::Justification::centred);
+    emptyHint_.setColour (juce::Label::textColourId, theme::mint);
+    emptyHint_.setFont (makeFont (11.0f, false));
+    emptyHint_.setText ("NO SOUNDFONT LOADED - PRESS LOAD TO BROWSE PRESETS",
+                        juce::dontSendNotification);
+}
+
+BankBrowser::~BankBrowser() = default;
+
+void BankBrowser::buildBanks()
+{
+    juce::SortedSet<int> seen;
+    for (const auto& p : presets_)
+        seen.add (p.bank);
+
+    banks_.clear();
+    bankCombo_.clear (juce::dontSendNotification);
+    for (int b : seen)
+    {
+        banks_.push_back (b);
+        bankCombo_.addItem (juce::String (b).paddedLeft ('0', 2), (int) banks_.size());
+    }
+
+    selectedBank_ = banks_.empty() ? -1 : banks_.front();
+    if (!banks_.empty())
+        bankCombo_.setSelectedId (1, juce::dontSendNotification);
+    filterFor (selectedBank_);
+}
+
+void BankBrowser::filterFor (int bank)
+{
+    selectedBank_ = bank;
+    filtered_.clear();
+    for (int i = 0; i < (int) presets_.size(); ++i)
+        if (presets_[static_cast<std::size_t> (i)].bank == bank)
+            filtered_.push_back (i);
+    list_.updateContent();
+    list_.deselectAllRows();
+    list_.scrollToEnsureRowIsOnscreen (0);
+    repaint();
+}
+
+void BankBrowser::setPresets (std::vector<PresetEntry> presets)
+{
+    presets_ = std::move (presets);
+    buildBanks();
+    list_.setVisible (!filtered_.empty());
+    emptyHint_.setVisible (filtered_.empty());
+}
+
+void BankBrowser::setCurrent (int bank, int program)
+{
+    // Move the bank strip to the requested bank, then highlight its program.
+    if (!banks_.empty())
+    {
+        for (std::size_t i = 0; i < banks_.size(); ++i)
+        {
+            if (banks_[i] == bank && bankCombo_.getSelectedId() != (int) (i + 1))
+            {
+                bankCombo_.setSelectedId ((int) (i + 1), juce::dontSendNotification);
+                filterFor (bank);
+                break;
+            }
+        }
+    }
+
+    for (std::size_t row = 0; row < filtered_.size(); ++row)
+    {
+        const auto& p = presets_[static_cast<std::size_t> (filtered_[row])];
+        if (p.bank == bank && p.program == program)
+        {
+            if (list_.getSelectedRow() != (int) row)
+            {
+                juce::SparseSet<int> selection;
+                selection.addRange ({ (int) row, (int) row + 1 });
+                list_.setSelectedRows (selection, juce::dontSendNotification);
+                list_.scrollToEnsureRowIsOnscreen ((int) row);
+            }
+            return;
+        }
+    }
+}
+
+int BankBrowser::getNumRows()
+{
+    return (int) filtered_.size();
+}
+
+void BankBrowser::paintListBoxItem (int rowNumber, juce::Graphics& g, int width,
+                                    int height, bool rowIsSelected)
+{
+    auto r = juce::Rectangle<int> (0, 0, width, height).reduced (2, 1).toFloat();
+    if (rowNumber < 0 || rowNumber >= (int) filtered_.size())
+        return;
+    const auto& p = presets_[static_cast<std::size_t> (filtered_[static_cast<std::size_t> (rowNumber)])];
+
+    if (rowIsSelected)
+    {
+        g.setGradientFill (juce::ColourGradient (theme::mint, r.getTopLeft(),
+                                                 theme::mintDeep, r.getBottomLeft(), false));
+        g.fillRoundedRectangle (r, 3.0f);
+        g.setColour (juce::Colour (0xff06231b));
+    }
+    else
+    {
+        g.setColour ((rowNumber % 2) ? juce::Colour (0xff1a1d19) : theme::body2);
+        g.fillRoundedRectangle (r, 3.0f);
+        g.setColour (theme::knobCream);
+    }
+
+    const auto num = juce::String (p.bank).paddedLeft ('0', 2) + "-"
+                     + juce::String (p.program).paddedLeft ('0', 3);
+    g.setFont (makeFont (10.0f, true));
+    g.drawText (num, 6, 0, 56, height, juce::Justification::centredLeft);
+    g.setFont (makeFont (10.0f, false));
+    g.drawText (p.name, 64, 0, width - 70, height, juce::Justification::centredLeft);
+}
+
+void BankBrowser::selectedRowsChanged (int lastRowChanged)
+{
+    if (lastRowChanged < 0 || lastRowChanged >= (int) filtered_.size())
+        return;
+    const auto& p = presets_[static_cast<std::size_t> (filtered_[static_cast<std::size_t> (lastRowChanged)])];
+    if (onSelect_)
+        onSelect_ (p.bank, p.program);
+}
+
+void BankBrowser::resized()
+{
+    auto b = getLocalBounds();
+    bankCombo_.setBounds (b.removeFromTop (26).withTrimmedLeft (2).withTrimmedRight (2));
+    b.removeFromTop (4);
+    list_.setBounds (b.reduced (2, 0));
+    emptyHint_.setBounds (b.reduced (2, 0));
+}
+
+// ============================================================================
 // RomplerEditor
 // ============================================================================
 
@@ -504,7 +706,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     brandTitle_.setFont (makeFont (26.0f, true));
 
     addAndMakeVisible (brandSub_);
-    brandSub_.setText ("SF2 ROMPLER  \u00b7  NONLINEAR DRIVE", juce::dontSendNotification);
+    brandSub_.setText ("SF2 ROMPLER  /  NONLINEAR DRIVE", juce::dontSendNotification);
     brandSub_.setJustificationType (juce::Justification::centredLeft);
     brandSub_.setColour (juce::Label::textColourId, theme::mint);
     brandSub_.setFont (makeFont (10.0f, false));
@@ -513,22 +715,22 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     badges_.setJustificationType (juce::Justification::centredRight);
     badges_.setColour (juce::Label::textColourId, juce::Colour (0xff8b9186));
     badges_.setFont (makeFont (9.5f, false));
-    badges_.setText ("VST3 \u00b7 AU \u00b7 STANDALONE\nSisyphus Audio \u2014 M1", juce::dontSendNotification);
+    badges_.setText ("VST3 / AU / STANDALONE\nSisyphus Audio - M1", juce::dontSendNotification);
 
     addAndMakeVisible (voiceBox_);
     addAndMakeVisible (busBox_);
     addAndMakeVisible (fxBox_);
 
     auto& apvts = processor_.getValueTreeState();
-    controls_[0]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::voiceDrive)), true);
+    controls_[0]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::voiceDrive)));
     controls_[1]  = std::make_unique<Switch> (*dynamic_cast<juce::AudioParameterChoice*>  (apvts.getParameter (ParamIDs::voiceCurve)));
-    controls_[2]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::voiceVelToDrive)), true);
+    controls_[2]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::voiceVelToDrive)));
     controls_[3]  = std::make_unique<Toggle> (*dynamic_cast<juce::AudioParameterChoice*>  (apvts.getParameter (ParamIDs::voiceFilterRouting)));
     controls_[4]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::voiceFilterOffset)));
     controls_[5]  = std::make_unique<Stepper> (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::polyLimit)));
-    controls_[6]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::busTapeDrive)), true);
-    controls_[7]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::busFold)), true);
-    controls_[8]  = std::make_unique<Switch> (*dynamic_cast<juce::AudioParameterChoice*>  (apvts.getParameter (ParamIDs::busOsFactor)));
+    controls_[6]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::busTapeDrive)));
+    controls_[7]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::busFold)));
+    controls_[8]  = std::make_unique<Switch> (*dynamic_cast<juce::AudioParameterChoice*>  (apvts.getParameter (ParamIDs::busOsFactor)), juce::String(), true);
     controls_[9]  = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::outTrim)));
     controls_[10] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::outMix)));
     controls_[11] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::fxChorusRate)));
@@ -543,6 +745,39 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
             addAndMakeVisible (*c);
     }
 
+    // UI labels follow the design mockup (shorter than the APVTS names).
+    const auto setKnobLabel = [] (std::unique_ptr<juce::Component>& c, const juce::String& s)
+    {
+        if (auto* k = dynamic_cast<Knob*> (c.get()))
+            k->setNameOverride (s);
+    };
+    const auto setChoiceLabel = [] (std::unique_ptr<juce::Component>& c, const juce::String& s)
+    {
+        if (auto* sw = dynamic_cast<Switch*> (c.get()))
+            sw->setLabel (s);
+        if (auto* t = dynamic_cast<Toggle*> (c.get()))
+            t->setLabel (s);
+        if (auto* st = dynamic_cast<Stepper*> (c.get()))
+            st->setLabel (s);
+    };
+    setKnobLabel (controls_[0], "DRIVE");
+    setChoiceLabel (controls_[1], "CURVE");
+    setKnobLabel (controls_[2], "VEL > DRIVE");
+    setChoiceLabel (controls_[3], "FILTER ROUTE");
+    setKnobLabel (controls_[4], "FILTER OFFSET");
+    setChoiceLabel (controls_[5], "POLYPHONY");
+    setKnobLabel (controls_[6], "TAPE DRIVE");
+    setKnobLabel (controls_[7], "FOLD");
+    setChoiceLabel (controls_[8], "OVERSAMPLE");
+    setKnobLabel (controls_[9], "OUT TRIM");
+    setKnobLabel (controls_[10], "MIX");
+    setKnobLabel (controls_[11], "CH RATE");
+    setKnobLabel (controls_[12], "CH DEPTH");
+    setKnobLabel (controls_[13], "CH MIX");
+    setKnobLabel (controls_[14], "REV ROOM");
+    setKnobLabel (controls_[15], "REV DAMP");
+    setKnobLabel (controls_[16], "REV MIX");
+
     // Dock: soundfont display + bank/program + load + peak meter.
     addAndMakeVisible (sfLabel_);
     sfLabel_.setText ("SOUNDFONT", juce::dontSendNotification);
@@ -554,20 +789,14 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     sfDisplay_.setJustificationType (juce::Justification::centredLeft);
     sfDisplay_.setColour (juce::Label::textColourId, theme::mint);
     sfDisplay_.setColour (juce::Label::backgroundColourId, theme::displayBg);
-    sfDisplay_.setFont (makeFont (13.0f, true));
+    sfDisplay_.setFont (makeFont (10.5f, true));
     refreshDisplay();
 
     addAndMakeVisible (bankDigits_);
     bankDigits_.setJustificationType (juce::Justification::centred);
     bankDigits_.setColour (juce::Label::textColourId, theme::mint);
     bankDigits_.setColour (juce::Label::backgroundColourId, theme::displayBg);
-    bankDigits_.setFont (makeFont (14.0f, true));
-
-    addAndMakeVisible (progDigits_);
-    progDigits_.setJustificationType (juce::Justification::centred);
-    progDigits_.setColour (juce::Label::textColourId, theme::mint);
-    progDigits_.setColour (juce::Label::backgroundColourId, theme::displayBg);
-    progDigits_.setFont (makeFont (14.0f, true));
+    bankDigits_.setFont (makeFont (11.0f, true));
 
     addAndMakeVisible (loadButton_);
     loadButton_.setColour (juce::TextButton::buttonColourId, theme::mintDeep);
@@ -576,13 +805,21 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
 
     addAndMakeVisible (peakMeter_);
 
+    // Bank/program browser: fills from the loaded SoundFont's preset table.
+    bankBrowser_ = std::make_unique<BankBrowser>();
+    bankBrowser_->setOnSelect ([this] (int bank, int program) {
+        processor_.selectPreset (bank, program);
+    });
+    addAndMakeVisible (*bankBrowser_);
+    refreshPresetList();
+
     addAndMakeVisible (keyboard_);
     keyboard_.setKeyRange (36, 36);   // C2..C5
     keyboard_.setNoteCallback ([this] (int note, bool on) {
         processor_.postNote (note, on, 100);
     });
 
-    setSize (820, 600);
+    setSize (820, 820);
 
     startTimerHz (20);
 }
@@ -619,26 +856,35 @@ void RomplerEditor::resized()
     voiceBox_.setBounds (deck.withWidth (colW));
     busBox_.setBounds (deck.withX (colW + 12).withWidth (colW));
 
-    layoutVoiceControls (voiceBox_.getLocalBounds().reduced (10, 12).withY (18));
-    layoutBusControls (busBox_.getLocalBounds().reduced (10, 12).withY (18));
+    layoutVoiceControls (voiceBox_.getBounds().reduced (10, 12).withTop (voiceBox_.getY() + 18));
+    layoutBusControls (busBox_.getBounds().reduced (10, 12).withTop (busBox_.getY() + 18));
 
     b.removeFromTop (8);
 
     // FX box spans the full width.
-    auto fx = b.removeFromTop (130);
+    auto fx = b.removeFromTop (120);
     fxBox_.setBounds (fx);
-    layoutFxControls (fxBox_.getLocalBounds().reduced (10, 12).withY (18));
+    layoutFxControls (fxBox_.getBounds().reduced (10, 12).withTop (fxBox_.getY() + 18));
+
+    b.removeFromTop (8);
+
+    // Bank/program browser between the FX section and the dock.
+    bankBrowser_->setBounds (b.removeFromTop (200));
 
     b.removeFromTop (8);
 
     // Dock.
     auto dock = b.removeFromTop (56);
-    sfLabel_.setBounds (dock.withWidth (100).withY (2));
-    sfDisplay_.setBounds (dock.withX (100).withY (16).withWidth (dock.getWidth() - 100 - 220));
-    bankDigits_.setBounds (dock.withRightX (dock.getRight() - 200).withY (12).withWidth (80));
-    progDigits_.setBounds (dock.withRightX (dock.getRight() - 110).withY (12).withWidth (80));
-    loadButton_.setBounds (dock.withRightX (dock.getRight() - 8).withY (10).withWidth (96));
-    peakMeter_.setBounds (dock.withX (dock.getWidth() - 340).withY (22).withWidth (90));
+    const int dx = dock.getX();
+    const int dy = dock.getY();
+    const int loadX  = dock.getRight() - 96;
+    const int bankX  = loadX - 8 - 76;
+    const int meterX = bankX - 12 - 88;
+    sfLabel_.setBounds   (dx,       dy + 1,  92,                  14);
+    sfDisplay_.setBounds (dx + 97,  dy + 18, meterX - dx - 97 - 12, 24);
+    peakMeter_.setBounds (meterX,   dy + 20, 88,                  20);
+    bankDigits_.setBounds (bankX,   dy + 18, 76,                  24);
+    loadButton_.setBounds (loadX,   dy + 10, 96,                  36);
 
     b.removeFromTop (8);
 
@@ -685,9 +931,6 @@ void RomplerEditor::layoutBusControls (juce::Rectangle<int> area)
     place (8, 0, 2);   // Oversample
     place (9, 1, 0);   // Out Trim
     place (10, 1, 1);  // Mix
-    // Peak meter occupies the last cell.
-    peakMeter_.setBounds (area.withX (area.getX() + 2 * cellW).withY (area.getY() + cellH)
-                              .withSize (cellW, cellH).reduced (16, 20));
 }
 
 void RomplerEditor::layoutFxControls (juce::Rectangle<int> area)
@@ -699,7 +942,7 @@ void RomplerEditor::layoutFxControls (juce::Rectangle<int> area)
         const int idx = 11 + i;
         if (controls_[static_cast<size_t> (idx)])
             controls_[static_cast<size_t> (idx)]->setBounds (
-                area.withX (area.getX() + i * cellW).withY (0)
+                area.withX (area.getX() + i * cellW).withY (area.getY())
                     .withSize (cellW, area.getHeight()).reduced (6, 2));
     }
 }
@@ -713,15 +956,17 @@ void RomplerEditor::refreshDisplay()
 
 void RomplerEditor::refreshPresetList()
 {
+    std::vector<PresetEntry> presets;
     const int count = processor_.getPresetCount();
-    if (count > 0)
-        sfDisplay_.setText (processor_.getPresetName (0), juce::dontSendNotification);
-}
-
-void RomplerEditor::onPresetChanged()
-{
-    // Placeholder: preset selection is driven by the dock readout in this
-    // design; kept minimal.
+    presets.reserve (static_cast<std::size_t> (count));
+    for (int i = 0; i < count; ++i)
+    {
+        const auto [bank, program] = processor_.getPresetBankProgram (i);
+        presets.push_back ({ bank, program, processor_.getPresetName (i) });
+    }
+    bankBrowser_->setPresets (std::move (presets));
+    const auto [bank, program] = processor_.getCurrentBankProgram();
+    bankBrowser_->setCurrent (bank, program);
 }
 
 void RomplerEditor::onLoadButtonClicked()
@@ -753,7 +998,9 @@ void RomplerEditor::timerCallback()
 
     const auto [bank, program] = processor_.getCurrentBankProgram();
     bankDigits_.setText (juce::String (bank).paddedLeft ('0', 2), juce::dontSendNotification);
-    progDigits_.setText (juce::String (program).paddedLeft ('0', 2), juce::dontSendNotification);
+
+    if (bankBrowser_)
+        bankBrowser_->setCurrent (bank, program);
 }
 
 } // namespace aod

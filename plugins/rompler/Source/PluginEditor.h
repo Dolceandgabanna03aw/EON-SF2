@@ -74,6 +74,9 @@ public:
     explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
     ~Knob() override;
 
+    /** Optionally override the printed name with an explicit UI label. */
+    void setNameOverride (const juce::String& label) { name_.setText (label, juce::dontSendNotification); }
+
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -101,22 +104,28 @@ private:
 class Switch final : public juce::Component
 {
 public:
-    explicit Switch (juce::AudioParameterChoice& param);
+    explicit Switch (juce::AudioParameterChoice& param, const juce::String& label = {}, bool leds = false);
     ~Switch() override;
+
+    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
-    void rebuildSegments();
+    void advanceChoice();
 
     [[maybe_unused]] juce::AudioParameterChoice& param_;
     juce::Label label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
-    std::vector<juce::Rectangle<int>> segments_;
-    int numSegments_ = 0;
+    juce::Rectangle<int> pill_;
+    float lastDragY_ = 0.0f;
+    bool leds_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Switch)
 };
@@ -128,8 +137,10 @@ private:
 class Toggle final : public juce::Component
 {
 public:
-    explicit Toggle (juce::AudioParameterChoice& param);
+    explicit Toggle (juce::AudioParameterChoice& param, const juce::String& label = {});
     ~Toggle() override;
+
+    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -152,20 +163,24 @@ private:
 class Stepper final : public juce::Component
 {
 public:
-    explicit Stepper (juce::RangedAudioParameter& param);
+    explicit Stepper (juce::RangedAudioParameter& param, const juce::String& label = {});
     ~Stepper() override;
+
+    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
     [[maybe_unused]] juce::RangedAudioParameter& param_;
     juce::Label label_;
     juce::Slider slider_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
-    juce::Rectangle<int> upArrow_;
-    juce::Rectangle<int> downArrow_;
+    float lastDragY_ = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Stepper)
 };
@@ -222,6 +237,54 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Keyboard)
 };
 
+/** A single SoundFont program as listed in the browser. */
+struct PresetEntry
+{
+    int bank = 0;
+    int program = 0;
+    juce::String name;
+};
+
+/**
+    The bank/program browser: a bank selector strip on top and a scrolling list
+    of the programs in the active bank below. Clicking a row selects that
+    program through the callback wired to RomplerProcessor::selectPreset.
+*/
+class BankBrowser final : public juce::Component,
+                          private juce::ListBoxModel
+{
+public:
+    BankBrowser();
+    ~BankBrowser() override;
+
+    void setPresets (std::vector<PresetEntry> presets);
+    void setCurrent (int bank, int program);
+    void setOnSelect (std::function<void (int, int)> cb) { onSelect_ = std::move (cb); }
+
+    void resized() override;
+
+private:
+    // juce::ListBoxModel
+    int getNumRows() override;
+    void paintListBoxItem (int rowNumber, juce::Graphics&, int width,
+                           int height, bool rowIsSelected) override;
+    void selectedRowsChanged (int lastRowChanged) override;
+
+    void buildBanks();
+    void filterFor (int bank);
+
+    juce::ComboBox bankCombo_;
+    juce::ListBox list_ { "preset list", this };
+    juce::Label emptyHint_;
+    std::vector<PresetEntry> presets_;
+    std::vector<int> banks_;
+    std::vector<int> filtered_;          // indices into presets_ for the active bank
+    int selectedBank_ = -1;
+    std::function<void (int, int)> onSelect_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BankBrowser)
+};
+
 class RomplerEditor final : public juce::AudioProcessorEditor,
                             private juce::ComboBox::Listener,
                             private juce::Timer
@@ -250,17 +313,16 @@ private:
     juce::Label sfLabel_;
     juce::Label sfDisplay_;
     juce::Label bankDigits_;
-    juce::Label progDigits_;
     juce::TextButton loadButton_ { "LOAD" };
     PeakMeter peakMeter_;
 
+    std::unique_ptr<BankBrowser> bankBrowser_;
     Keyboard keyboard_;
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
     void refreshDisplay();
     void refreshPresetList();
-    void onPresetChanged();
     void onLoadButtonClicked();
     void layoutVoiceControls (juce::Rectangle<int> area);
     void layoutBusControls (juce::Rectangle<int> area);
