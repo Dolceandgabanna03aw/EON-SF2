@@ -29,12 +29,14 @@ public:
     /** Short fade-out time used by the attack stage when a key is released during it. */
     static constexpr float releaseTime = 0.08f;
 
-    void start(const Sample* sample, float velocity) noexcept;
+    void start(const Sample* sample, int midiNote, float velocity) noexcept;
     /** Starts a short release fade; the voice deactivates itself once it reaches zero. */
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
     /** True while fading out from a note-off, before the slot is retired. */
     [[nodiscard]] bool isReleasing() const noexcept { return active_ && releasing_; }
+    /** The note this voice is currently sounding (or -1 once it has no note). */
+    [[nodiscard]] int note() const noexcept { return midiNote_; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
@@ -44,6 +46,7 @@ private:
     double phase_ = 0.0;
     float velocity_ = 0.0f;
     bool active_ = false;
+    int midiNote_ = -1;
     float envPhase_ = 0.0f;
     bool releasing_ = false;
     float releaseLevel_ = 0.0f;

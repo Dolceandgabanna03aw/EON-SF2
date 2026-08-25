@@ -5,10 +5,11 @@
 namespace aod
 {
 
-void Voice::start(const Sample* sample, float velocity) noexcept
+void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
 {
     sample_ = sample;
     velocity_ = velocity;
+    midiNote_ = midiNote;
     phase_ = 0.0;
     envPhase_ = 0.0f;
     active_ = true;
@@ -136,11 +137,23 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
     if (midiNote < 0 || midiNote >= 128)
         return;
 
+    // Retrigger: if this note already owns a voice, reset it in place instead
+    // of allocating a fresh slot. Without this, mashing one key consumes a new
+    // voice per press and the old voice keeps ringing underneath.
+    const int existing = noteToVoice_[static_cast<std::size_t>(midiNote)];
+    if (existing >= 0 && static_cast<std::size_t>(existing) < voices_.size()
+        && voices_[static_cast<std::size_t>(existing)].note() == midiNote
+        && voices_[static_cast<std::size_t>(existing)].isActive())
+    {
+        voices_[static_cast<std::size_t>(existing)].start (sample, midiNote, velocity);
+        return;
+    }
+
     Voice* voice = findFreeVoice();
     if (voice == nullptr)
         return;
 
-    voice->start(sample, velocity);
+    voice->start (sample, midiNote, velocity);
     noteToVoice_[static_cast<std::size_t>(midiNote)] =
         static_cast<int>(voice - voices_.data());
 }
@@ -151,7 +164,11 @@ void VoicePool::stop(int midiNote) noexcept
         return;
 
     const int voiceIdx = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    if (voiceIdx >= 0 && static_cast<std::size_t>(voiceIdx) < voices_.size())
+    // Guard against a stale index: the slot may have been recycled for a
+    // different note since this note's note-off, so only release it if it is
+    // still actually sounding this note.
+    if (voiceIdx >= 0 && static_cast<std::size_t>(voiceIdx) < voices_.size()
+        && voices_[static_cast<std::size_t>(voiceIdx)].note() == midiNote)
         voices_[static_cast<std::size_t>(voiceIdx)].stop();
 }
 
