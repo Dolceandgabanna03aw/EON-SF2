@@ -1,7 +1,6 @@
 #include "SF2Loader.h"
 #include <cstring>
 #include <map>
-#include <tuple>
 
 namespace eon
 {
@@ -47,13 +46,20 @@ bool SF2Loader::loadFile(const juce::File& file)
 
     // Regions split one recording by key or velocity far more often than they
     // need a private copy of it: on a General MIDI bank this cache is the
-    // difference between converting the audio once per unique (start, end,
-    // source rate) and once per region — roughly 13x less work and memory on
-    // FluidR3_GM. Scoped to this load: it is discarded once every region has
-    // taken a shared_ptr into it. A std::map keyed on the actual tuple, rather
-    // than a hand-combined hash, is deliberate — a colliding hash here would
-    // silently hand two unrelated regions the same audio.
-    std::map<std::tuple<std::uint32_t, std::uint32_t, int>, SharedPcm> pcmCache;
+    // difference between converting the audio once per unique [start, end) and
+    // once per region — roughly 13x less work and memory on FluidR3_GM. Scoped
+    // to this load: it is discarded once every region has taken a shared_ptr
+    // into it. A std::map keyed on the actual pair, rather than a hand-combined
+    // hash, is deliberate — a colliding hash here would silently hand two
+    // unrelated regions the same audio.
+    //
+    // The source rate is not part of the key: the buffer is stored unresampled,
+    // so a range's contents depend only on the range. Two regions naming the
+    // same bytes with different sampleRateHz would be a malformed bank, and
+    // they would still get byte-identical audio here — only their playback
+    // increments would differ, which is exactly right.
+    std::map<std::pair<std::uint32_t, std::uint32_t>,
+             std::shared_ptr<const std::vector<float>>> pcmCache;
 
     for (const auto& preset : presets)
     {
@@ -61,37 +67,21 @@ bool SF2Loader::loadFile(const juce::File& file)
         {
             Sample sample;
 
-            const auto sourceRate = static_cast<int>(region.sampleRateHz);
-            const auto cacheKey = std::make_tuple(region.start, region.end, sourceRate);
-
-            auto [entry, inserted] = pcmCache.try_emplace(cacheKey);
+            auto [entry, inserted] = pcmCache.try_emplace({ region.start, region.end });
             if (inserted)
-                entry->second = buildSharedPcm(rawBank.sampleData, region.start, region.end, sourceRate);
+                entry->second = buildSharedPcm(rawBank.sampleData, region.start, region.end);
 
-            sample.data = entry->second.data;
-            sample.sampleRate = hostSampleRate_;
+            sample.data = entry->second;
+            sample.sampleRate = static_cast<int>(region.sampleRateHz);
 
-            // Loop points are frame indices into the *source* audio. The shared
-            // buffer may already be resampled, so they still have to be rescaled
-            // per region — a zone can override its loop points independently of
-            // the sample it references, so this part cannot be shared even when
-            // the audio is.
-            const std::uint32_t rawLoopStart = region.loopStart > region.start
-                                              ? region.loopStart - region.start : 0;
-            const std::uint32_t rawLoopEnd = region.loopEnd > region.start
-                                            ? region.loopEnd - region.start : 0;
-
-            if (entry->second.resampled)
-            {
-                const auto ratio = entry->second.resampleRatio;
-                sample.loopStart = static_cast<int>(static_cast<float>(rawLoopStart) * ratio);
-                sample.loopEnd = static_cast<int>(static_cast<float>(rawLoopEnd) * ratio);
-            }
-            else
-            {
-                sample.loopStart = static_cast<int>(rawLoopStart);
-                sample.loopEnd = static_cast<int>(rawLoopEnd);
-            }
+            // Loop points index `data` directly, and `data` is in source frames,
+            // so these need no rescaling. They stay per-region rather than being
+            // shared with the audio: a zone can override its loop points
+            // independently of the sample it references.
+            sample.loopStart = static_cast<int>(region.loopStart > region.start
+                                                ? region.loopStart - region.start : 0);
+            sample.loopEnd = static_cast<int>(region.loopEnd > region.start
+                                              ? region.loopEnd - region.start : 0);
             sample.loopMode = region.loopMode;
 
             // Copied rather than referenced: the voice reads these on the audio
@@ -143,41 +133,11 @@ std::pair<int, int> SF2Loader::firstPresetProgram() const noexcept
     return { preset.bank, preset.program };
 }
 
-SF2Loader::SharedPcm SF2Loader::buildSharedPcm(std::span<const std::byte> sampleData,
-                                               std::uint32_t start, std::uint32_t end,
-                                               int sourceSampleRate) const
+std::shared_ptr<const std::vector<float>>
+    SF2Loader::buildSharedPcm(std::span<const std::byte> sampleData,
+                              std::uint32_t start, std::uint32_t end)
 {
-    auto raw = convertPcmRange(sampleData, start, end);
-
-    if (sourceSampleRate == hostSampleRate_ || raw.empty())
-        return { std::make_shared<const std::vector<float>>(std::move(raw)), 1.0f, false };
-
-    const float ratio = static_cast<float>(hostSampleRate_) / static_cast<float>(sourceSampleRate);
-    const auto newSize = static_cast<std::size_t>(static_cast<float>(raw.size()) * ratio);
-    if (newSize == 0)
-        return { std::make_shared<const std::vector<float>>(std::move(raw)), 1.0f, false };
-
-    std::vector<float> resampled(newSize);
-
-    for (std::size_t i = 0; i < newSize; ++i)
-    {
-        const float phase = static_cast<float>(i) / ratio;
-        const auto index = static_cast<std::size_t>(phase);
-
-        if (index >= raw.size() - 1)
-        {
-            resampled[i] = raw.back();
-        }
-        else
-        {
-            const float frac = phase - static_cast<float>(index);
-            const float s0 = raw[index];
-            const float s1 = raw[index + 1];
-            resampled[i] = s0 + frac * (s1 - s0);
-        }
-    }
-
-    return { std::make_shared<const std::vector<float>>(std::move(resampled)), ratio, true };
+    return std::make_shared<const std::vector<float>>(convertPcmRange(sampleData, start, end));
 }
 
 } // namespace eon

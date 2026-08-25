@@ -43,7 +43,7 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
     if (! testSf2File().existsAsFile())
         SKIP ("test SF2 corpus not present on this machine");
 
-    eon::SF2Loader loader (static_cast<int> (kSampleRate));
+    eon::SF2Loader loader;
     REQUIRE (loader.loadFile (testSf2File()));
 
     // Whichever preset the bank leads with, rather than a program number that

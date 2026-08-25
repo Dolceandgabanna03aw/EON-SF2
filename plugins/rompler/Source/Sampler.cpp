@@ -168,6 +168,7 @@ float AmpEnvelope::nextValue() noexcept
 
 void Voice::prepare (double sampleRate) noexcept
 {
+    sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     envelope_.prepare (sampleRate);
     filter_.prepare (sampleRate);
     dcBlocker_.prepare (sampleRate);
@@ -203,7 +204,14 @@ void Voice::start (const Sample* sample, int midiNote, float velocity, std::uint
 
     const float semitones = static_cast<float> (midiNote) - sample->rootKey;
     const float cents = semitones * sample->scaleTuningCentsPerKey + sample->tuneCents;
-    pitchRatio_ = std::pow (2.0, static_cast<double> (cents) / 1200.0);
+
+    // The sample is stored at whatever rate it was recorded at, so the phase
+    // increment carries the rate conversion as well as the transposition. The
+    // loader used to resample every sample to the host rate up front; doing it
+    // here costs nothing extra — the interpolating read below was already a
+    // resampler — and avoids interpolating the audio twice.
+    const double rateRatio = static_cast<double> (sample->sampleRate) / sampleRate_;
+    pitchRatio_ = std::pow (2.0, static_cast<double> (cents) / 1200.0) * rateRatio;
 
     panGains (sample->pan, gainLeft_, gainRight_);
     staticGain_ = juce::Decibels::decibelsToGain (-sample->attenuationDb);

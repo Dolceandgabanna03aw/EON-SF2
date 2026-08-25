@@ -27,8 +27,14 @@ enum class VoiceCurve
 };
 
 /**
-    One region's audio, resampled to the host rate at load time, together with
-    the region parameters the voice needs to play it.
+    One region's audio at its own recorded sample rate, together with the region
+    parameters the voice needs to play it.
+
+    Deliberately *not* resampled to the host rate. The voice already plays back
+    by advancing a fractional phase and interpolating, so it is a resampler
+    already; the sample rate ratio is folded into that phase increment instead.
+    That removes a whole conversion pass from every bank load, and removes one
+    of two chained interpolations from the signal path.
 
     The region's own values are copied in rather than referenced: the voice runs
     on the audio thread and the RegionIndex that owns the Region can be swapped
@@ -44,7 +50,12 @@ struct Sample
     // itself is shared. Never null once a Sample is populated by SF2Loader —
     // callers check emptiness with `data->empty()`, not for null.
     std::shared_ptr<const std::vector<float>> data;
+
+    /// The rate `data` was recorded at, not the host's. Voice::start divides by
+    /// the host rate to get the playback increment.
     int sampleRate = 48000;
+
+    /// Frame indices into `data`, so in source frames like everything else here.
     int loopStart = 0;
     int loopEnd = 0;
     x10::instrument::LoopMode loopMode = x10::instrument::LoopMode::none;
@@ -153,6 +164,7 @@ private:
     [[nodiscard]] float nextSample() noexcept;
 
     const Sample* sample_ = nullptr;
+    double sampleRate_ = 48000.0;   ///< Host rate, for the source-rate ratio in start().
     double phase_ = 0.0;
     double pitchRatio_ = 1.0;
     float velocity_ = 0.0f;
