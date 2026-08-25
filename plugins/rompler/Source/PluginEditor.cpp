@@ -112,7 +112,13 @@ void Knob::mouseUp (const juce::MouseEvent&)
 
 void Knob::mouseDrag (const juce::MouseEvent& e)
 {
-    const float delta = (lastDragY_ - e.y) / 60.0f;
+    // Map a full-height drag to the parameter's whole range so the knob is
+    // actually usable. The slider stores denormalised parameter values (e.g.
+    // Drive is 0..100), so a raw per-pixel delta of 1/60 is far too small to
+    // move it visibly.
+    const auto range = param_.getNormalisableRange();
+    const float pixelsPerFullRange = 200.0f;
+    const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
 }
@@ -352,7 +358,12 @@ void Stepper::mouseUp (const juce::MouseEvent&)
 
 void Stepper::mouseDrag (const juce::MouseEvent& e)
 {
-    const float delta = (lastDragY_ - e.y) / 60.0f;
+    // Same scaling as Knob: a full-height drag spans the parameter's range, so
+    // integer parameters (polyphony 1..128) advance visibly instead of 1 per
+    // 60 pixels.
+    const auto range = param_.getNormalisableRange();
+    const float pixelsPerFullRange = 200.0f;
+    const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
 }
