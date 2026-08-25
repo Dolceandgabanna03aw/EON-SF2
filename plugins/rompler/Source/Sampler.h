@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <tuple>
 #include <vector>
 
@@ -35,7 +36,14 @@ enum class VoiceCurve
 */
 struct Sample
 {
-    std::vector<float> data;
+    // Shared, not owned outright: many regions in a General MIDI bank split the
+    // same recording by key or velocity, and each used to hold a private copy
+    // of the converted audio. A 141 MB bank turned into 3.8 GB of resident
+    // memory that way. Per-region fields below stay per-Sample, because they
+    // genuinely differ between regions that share this buffer; only the audio
+    // itself is shared. Never null once a Sample is populated by SF2Loader —
+    // callers check emptiness with `data->empty()`, not for null.
+    std::shared_ptr<const std::vector<float>> data;
     int sampleRate = 48000;
     int loopStart = 0;
     int loopEnd = 0;

@@ -52,7 +52,8 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
 
     eon::Sample* sample = loader.getSample (bank, program, 60, 100);
     REQUIRE (sample != nullptr);
-    REQUIRE (! sample->data.empty());
+    REQUIRE (sample->data != nullptr);
+    REQUIRE (! sample->data->empty());
 }
 
 TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][m1]")

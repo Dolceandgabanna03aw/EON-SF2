@@ -191,7 +191,7 @@ void Voice::reset() noexcept
 
 void Voice::start (const Sample* sample, int midiNote, float velocity, std::uint32_t age) noexcept
 {
-    if (sample == nullptr || sample->data.empty())
+    if (sample == nullptr || sample->data == nullptr || sample->data->empty())
         return;
 
     sample_ = sample;
@@ -234,7 +234,7 @@ void Voice::kill() noexcept
 
 float Voice::nextSample() noexcept
 {
-    const auto& data = sample_->data;
+    const auto& data = *sample_->data;
     const auto sampleCount = data.size();
 
     if (sampleCount < 2)
@@ -281,7 +281,7 @@ float Voice::nextSample() noexcept
 void Voice::render (float* dryL, float* dryR, float* wetL, float* wetR,
                     int numSamples, const VoiceSettings& settings) noexcept
 {
-    if (! active_ || sample_ == nullptr || sample_->data.empty())
+    if (! active_ || sample_ == nullptr || sample_->data == nullptr || sample_->data->empty())
         return;
 
     // Velocity shifts drive around the knob position rather than scaling it, so

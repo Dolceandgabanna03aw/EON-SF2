@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <numbers>
 #include <vector>
 
@@ -16,16 +17,17 @@ constexpr int    kBlockSize  = 64;
 /** A sine of known length, loud enough that the drive stage has something to work on. */
 eon::Sample makeSine (int lengthSamples, float frequencyHz, float amplitude = 0.5f)
 {
-    eon::Sample sample;
-    sample.data.resize (static_cast<std::size_t> (lengthSamples));
+    std::vector<float> data (static_cast<std::size_t> (lengthSamples));
 
     for (int i = 0; i < lengthSamples; ++i)
     {
         const auto phase = 2.0 * std::numbers::pi_v<double> * static_cast<double> (frequencyHz)
                          * static_cast<double> (i) / kSampleRate;
-        sample.data[static_cast<std::size_t> (i)] = amplitude * static_cast<float> (std::sin (phase));
+        data[static_cast<std::size_t> (i)] = amplitude * static_cast<float> (std::sin (phase));
     }
 
+    eon::Sample sample;
+    sample.data = std::make_shared<const std::vector<float>> (std::move (data));
     sample.sampleRate = static_cast<int> (kSampleRate);
     sample.rootKey = 60.0f;
 
