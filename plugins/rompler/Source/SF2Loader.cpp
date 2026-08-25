@@ -1,4 +1,5 @@
 #include "SF2Loader.h"
+#include <algorithm>
 #include <cstring>
 
 namespace aod
@@ -54,6 +55,15 @@ bool SF2Loader::loadFile(const juce::File& file)
                                                      ? region.loopStart - region.start : 0);
             sample.loopEnd = static_cast<int>(region.loopEnd > region.start
                                                    ? region.loopEnd - region.start : 0);
+            // Loop points may exceed the loaded playback range in malformed
+            // files (endLoop past end). Clamp them so the loop wraps inside the
+            // buffer and a release tail never reads out of bounds.
+            if (sample.data.size() >= 2)
+            {
+                const auto maxFrame = static_cast<int> (sample.data.size() - 1);
+                sample.loopEnd = std::min (sample.loopEnd, maxFrame);
+                sample.loopStart = std::min (sample.loopStart, maxFrame - 1);
+            }
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
             sample.filterCutoffHz = region.filterCutoffHz;
             sample.filterResonanceDb = region.filterResonanceDb;

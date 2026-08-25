@@ -167,3 +167,71 @@ TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][v
     pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
+
+TEST_CASE ("a saturated pool steals the longest-held voice for a new note", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+
+    // Fill all slots with held notes so no voice is free or releasing.
+    pool.setPolyphony (2);
+    pool.start (&sample, 60, 0.5f);
+    pool.start (&sample, 62, 0.5f);
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < 8; ++b) // let note 60's envelope age
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    }
+
+    // A third note must steal the oldest slot (60) rather than drop silently.
+    pool.start (&sample, 64, 0.5f);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
+}
+
+TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[dsp][voice]")
+{
+    aod::Sample sample;
+    // Very short sample: release starts after the tone has nearly ended, so the
+    // old code path would cut the voice off at the buffer end and click.
+    constexpr int length = 128;
+    sample.data.resize (static_cast<std::size_t> (length));
+    for (int i = 0; i < length; ++i)
+        sample.data[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f
+                                                             * static_cast<float> (i)
+                                                             / static_cast<float> (kSampleRate));
+    sample.sampleRate = kSampleRate;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 0.8f);
+
+    // Play the tone nearly to the end of the sample, then release.
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < 1; ++b)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    }
+    pool.stop (60);
+
+    // The release must still fade out to silence rather than stopping the
+    // moment the sample ends.
+    float lastPeak = 1.0f;
+    bool hitZero = false;
+    for (int b = 0; b < 32; ++b)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        const float p = blockPeak (block.data(), kBlockSize);
+        REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
+        lastPeak = p;
+        if (p <= 1.0e-6f)
+        {
+            hitZero = true;
+            break;
+        }
+    }
+    REQUIRE (hitZero);
+}
