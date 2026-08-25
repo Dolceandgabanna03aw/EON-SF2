@@ -18,6 +18,12 @@ compile_commands.json
 # Synthetic fixtures for the actual test suite live in libs/sf2/test/support.
 testdata/
 
+# Offscreen UI render + tuning-session scratch under outputs/ (the layout
+# analysis scripts themselves are committed).
+outputs/*.png
+outputs/cli/
+outputs/Icon?
+
 # macOS custom-folder-icon marker files. Harmless on their own, but when a
 # JUCE plugin target copies a resource tree that contains one, codesign
 # rejects the bundle as carrying "detritus" and the build fails.
