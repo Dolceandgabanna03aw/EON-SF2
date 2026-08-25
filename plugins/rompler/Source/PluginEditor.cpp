@@ -148,7 +148,6 @@ void Knob::mouseDrag (const juce::MouseEvent& e)
     const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
-    repaint();
 }
 
 void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
@@ -156,7 +155,6 @@ void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetail
     const auto range = param_.getNormalisableRange();
     const float step = (range.end - range.start) / 100.0f;
     slider_.setValue (slider_.getValue() + (float) wheel.deltaY * step, juce::sendNotificationSync);
-    repaint();
 }
 
 // ============================================================================
@@ -187,7 +185,9 @@ void Switch::resized()
     const int pillW = juce::jlimit (48, w - 8, 96);
     const int top = leds_ ? 2 : 4;
     pill_ = juce::Rectangle<int> (0, top, pillW, leds_ ? 20 : 24).withX ((w - pillW) / 2);
-    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 2 : 4)));
+    // In the led variant the five segments are drawn from pill_.getBottom()+4
+    // down to +20, so the label must sit below them instead of overlapping.
+    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 22 : 4)));
 }
 
 void Switch::advanceChoice()
@@ -412,13 +412,11 @@ void Stepper::mouseDrag (const juce::MouseEvent& e)
     const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
-    repaint();
 }
 
 void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
 {
     slider_.setValue (slider_.getValue() + (float) wheel.deltaY, juce::sendNotificationSync);
-    repaint();
 }
 
 // ============================================================================
