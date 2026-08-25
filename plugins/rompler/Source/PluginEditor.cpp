@@ -44,6 +44,12 @@ Knob::Knob (juce::RangedAudioParameter& param, bool hot)
     slider_.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     attachment_ = std::make_unique<juce::SliderParameterAttachment> (param, slider_);
 
+    // The slider is not a visible child (we draw the knob ourselves), so value
+    // changes that arrive through the attachment never repaint us. Registering
+    // as a parameter listener makes the pointer and value print track the
+    // parameter from any source: drag, wheel, host automation, preset load.
+    param_.addListener (this);
+
     addAndMakeVisible (name_);
     name_.setText (param.getName (32), juce::dontSendNotification);
     name_.setJustificationType (juce::Justification::centred);
@@ -58,7 +64,26 @@ Knob::Knob (juce::RangedAudioParameter& param, bool hot)
     setSize (70, 96);
 }
 
-Knob::~Knob() = default;
+Knob::~Knob()
+{
+    // The parameter (owned by the processor) outlives this widget, so we must
+    // unregister before destruction or a later host change would call back into
+    // freed memory.
+    param_.removeListener (this);
+}
+
+void Knob::parameterValueChanged (int, float)
+{
+    // JUCE calls this synchronously and may do so from the audio thread.
+    // repaint() must run on the message thread, so just request an async
+    // update and let handleAsyncUpdate() do the drawing.
+    triggerAsyncUpdate();
+}
+
+void Knob::handleAsyncUpdate()
+{
+    repaint();
+}
 
 void Knob::paint (juce::Graphics& g)
 {
@@ -325,10 +350,27 @@ Stepper::Stepper (juce::RangedAudioParameter& param, const juce::String& label)
     slider_.setValue (param.getValue(), juce::dontSendNotification);
     attachment_ = std::make_unique<juce::SliderParameterAttachment> (param, slider_);
 
+    // See Knob: the hidden slider's value changes do not repaint the readout
+    // on their own, so listen to the parameter directly.
+    param_.addListener (this);
+
     setSize (110, 64);
 }
 
-Stepper::~Stepper() = default;
+Stepper::~Stepper()
+{
+    param_.removeListener (this);
+}
+
+void Stepper::parameterValueChanged (int, float)
+{
+    triggerAsyncUpdate();
+}
+
+void Stepper::handleAsyncUpdate()
+{
+    repaint();
+}
 
 void Stepper::resized()
 {

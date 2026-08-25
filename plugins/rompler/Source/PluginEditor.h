@@ -68,7 +68,9 @@ private:
     SliderParameterAttachment. Vertical drag and the mouse wheel change the
     value; the name and live value print below.
 */
-class Knob final : public juce::Component
+class Knob final : public juce::Component,
+                   private juce::AudioProcessorParameter::Listener,
+                   private juce::AsyncUpdater
 {
 public:
     explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
@@ -84,7 +86,16 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
+    /** Called (synchronously, possibly from the audio thread) when the bound
+        parameter's value changes from any source - drag, wheel, host
+        automation, preset restore. We only flag an async update here; the
+        actual repaint happens on the message thread in handleAsyncUpdate. */
+    void parameterValueChanged (int, float) override;
+    void parameterGestureChanged (int, bool) override {}
+
 private:
+    void handleAsyncUpdate() override;
+
     [[maybe_unused]] juce::RangedAudioParameter& param_;
     juce::Slider slider_;
     juce::Label name_;
@@ -160,7 +171,9 @@ private:
     POLYPHONY control in the mockup. Drives an AudioParameterInt via a
     SliderParameterAttachment backed by a hidden slider.
 */
-class Stepper final : public juce::Component
+class Stepper final : public juce::Component,
+                      private juce::AudioProcessorParameter::Listener,
+                      private juce::AsyncUpdater
 {
 public:
     explicit Stepper (juce::RangedAudioParameter& param, const juce::String& label = {});
@@ -175,7 +188,15 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
+    /** Called (synchronously, possibly from the audio thread) when the bound
+        parameter's value changes from any source. Only flags an async update;
+        the digit readout repaints on the message thread in handleAsyncUpdate. */
+    void parameterValueChanged (int, float) override;
+    void parameterGestureChanged (int, bool) override {}
+
 private:
+    void handleAsyncUpdate() override;
+
     [[maybe_unused]] juce::RangedAudioParameter& param_;
     juce::Label label_;
     juce::Slider slider_;
