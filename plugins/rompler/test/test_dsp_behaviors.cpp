@@ -321,3 +321,35 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     }
     REQUIRE (hitZero);
 }
+
+TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
+{
+    aod::Sample sample = makeTone();
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 0.8f);
+
+    // Render a few samples into the attack (attack is 10 ms at 48 kHz, so
+    // ~480 samples), then release while the envelope is still rising.
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.stop (60);
+
+    // Render one more block and look at the *first differences* across the
+    // release boundary. A 1 kHz sine at 48 kHz has a max slope of about 0.13
+    // samples^-1; a discontinuous envelope (fixed-time ramp from a low release
+    // level) would introduce a slope spike several times that. The scaled
+    // ramp keeps the fade slope the same whatever the release level.
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    float maxSlope = 0.0f;
+    for (int i = 1; i < kBlockSize; ++i)
+        maxSlope = std::max (maxSlope, std::abs (block[static_cast<std::size_t> (i)]
+                                                - block[static_cast<std::size_t> (i - 1)]));
+
+    // Sine slope bound is ~0.13; release ramps down at the same rate, so the
+    // combined envelope+sine slope stays under ~0.35. Anything much larger
+    // indicates a discontinuity (click) at the release point.
+    REQUIRE (maxSlope < 0.5f);
+}

@@ -51,7 +51,13 @@ float Voice::envelope() const noexcept
 
     if (releasing_)
     {
-        const float t = (envPhase_ - releasePhase_) / releaseTime;
+        // Scale the release ramp duration by the level at release time: a note
+        // released mid-attack (level 0.5) fades over half the nominal release
+        // time, so the *slope* of the fade is the same as a full-level release.
+        // A fixed-time ramp from a low level is a much sharper slope and clicks;
+        // this keeps the fade audibly consistent whatever the release level.
+        const float rampTime = releaseTime * std::max (releaseLevel_, 0.05f);
+        const float t = (envPhase_ - releasePhase_) / rampTime;
         if (t >= 1.0f)
             return 0.0f;
         return releaseLevel_ * (1.0f - t);
