@@ -172,6 +172,55 @@ TEST_CASE ("a looping region keeps sounding past the end of its data", "[voice][
     REQUIRE (peak < 1.5f);
 }
 
+TEST_CASE ("a loop still wraps cleanly when the source rate is not the host's", "[voice][dsp]")
+{
+    // The loop tests above use a sample already at the host rate, so the
+    // playback increment carries no rate conversion. Samples are stored at
+    // their own recorded rate now, which puts a ratio into that increment and
+    // leaves the loop points in source frames — a combination nothing else
+    // covers.
+    //
+    // The rate and the note are chosen so the two factors cancel: a 24 kHz
+    // sample against a 48 kHz host is a ratio of 0.5, and an octave above the
+    // root doubles it, for an increment of exactly 1.0. That matters, because
+    // the wrap bug this guards against is not reached by just any mismatch.
+    // It needs the phase to land exactly on the clamped loop end, so that the
+    // over-long wrap takes it to exactly -1.0; anything in (-1, 0) truncates
+    // to zero on the way into the interpolator and is merely wrong, not
+    // undefined. An increment of 1.0 from zero lands on it every cycle.
+    auto sample = makeSine (2000, 440.0f);
+    sample.sampleRate = 24000;                  // Half the 48 kHz host rate.
+    sample.loopMode = x10::instrument::LoopMode::continuous;
+    sample.loopStart = 0;
+    sample.loopEnd = 2000;                      // Again ending on the last frame.
+
+    const eon::VoiceSettings settings;
+
+    eon::Voice voice;
+    voice.prepare (kSampleRate);
+    voice.start (&sample, 72, 0.8f, 0);         // An octave up: 0.5 x 2.0 = 1.0.
+
+    Scratch scratch;
+
+    float peak = 0.0f;
+    bool allFinite = true;
+
+    // The increment is under half a frame per sample here, so this is a long
+    // way past the end of the data and through many wraps.
+    for (int block = 0; block < 200; ++block)
+    {
+        scratch.render (voice, settings);
+
+        peak = std::max (peak, scratch.wetPeak());
+        allFinite = allFinite && scratch.allFinite();
+    }
+
+    REQUIRE (voice.isActive());
+    REQUIRE (scratch.wetPeak() > 0.0f);
+    REQUIRE (allFinite);
+    REQUIRE (peak < 1.5f);
+}
+
 TEST_CASE ("note-off releases rather than cutting the voice off", "[voice][dsp]")
 {
     auto sample = makeSine (48000, 220.0f);

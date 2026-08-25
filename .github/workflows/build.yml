@@ -59,3 +59,33 @@ jobs:
 # Note on the two SF2 playback tests: they need a real third-party bank, and
 # the corpus lives outside the repository, so on a runner they skip cleanly and
 # report as passing. Their coverage is local-only until a bank is provided.
+
+  # The loop-wrap tests do not fail on the broken code in an ordinary build:
+  # the bad index is read, garbage comes back finite, and the assertions pass.
+  # They only have teeth under a sanitizer, so without this job they are
+  # decorative. Verified locally: the full suite is clean under -fsanitize=
+  # undefined, and the pre-fix code aborts on it.
+  #
+  # Linux only, to keep this to one extra JUCE build rather than two.
+  sanitizer:
+    name: linux-ubsan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build \
+            libasound2-dev libfreetype-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxcomposite-dev libxext-dev
+
+      - name: Build and test under UBSan
+        run: |
+          cmake -S . -B build-ubsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DX10_BUILD_PLUGINS=ON -DX10_BUILD_TESTS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
+          cmake --build build-ubsan
+          ctest --test-dir build-ubsan --output-on-failure
