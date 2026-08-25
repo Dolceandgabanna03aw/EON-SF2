@@ -22,6 +22,11 @@ public:
     void prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock) override;
     void releaseResources() override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+    // Overriding only the float form hides the double one. GCC's
+    // -Woverloaded-virtual treats that as an error; the using-declaration
+    // brings the base's double overload back into scope, which also keeps the
+    // default float-only behaviour a host sees unchanged.
+    using juce::AudioProcessor::processBlock;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;

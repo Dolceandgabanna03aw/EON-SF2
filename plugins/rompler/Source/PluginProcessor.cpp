@@ -217,7 +217,7 @@ bool RomplerProcessor::loadSoundFont(const juce::File& file)
 {
     // Parsed and resampled on the calling thread. A bank takes far too long to
     // build to do it while the audio thread is blocked.
-    auto incoming = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
+    auto incoming = std::make_unique<SF2Loader>();
 
     if (! incoming->loadFile(file))
         return false;

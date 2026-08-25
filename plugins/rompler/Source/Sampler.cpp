@@ -168,6 +168,7 @@ float AmpEnvelope::nextValue() noexcept
 
 void Voice::prepare (double sampleRate) noexcept
 {
+    sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     envelope_.prepare (sampleRate);
     filter_.prepare (sampleRate);
     dcBlocker_.prepare (sampleRate);
@@ -191,7 +192,7 @@ void Voice::reset() noexcept
 
 void Voice::start (const Sample* sample, int midiNote, float velocity, std::uint32_t age) noexcept
 {
-    if (sample == nullptr || sample->data.empty())
+    if (sample == nullptr || sample->data == nullptr || sample->data->empty())
         return;
 
     sample_ = sample;
@@ -203,7 +204,14 @@ void Voice::start (const Sample* sample, int midiNote, float velocity, std::uint
 
     const float semitones = static_cast<float> (midiNote) - sample->rootKey;
     const float cents = semitones * sample->scaleTuningCentsPerKey + sample->tuneCents;
-    pitchRatio_ = std::pow (2.0, static_cast<double> (cents) / 1200.0);
+
+    // The sample is stored at whatever rate it was recorded at, so the phase
+    // increment carries the rate conversion as well as the transposition. The
+    // loader used to resample every sample to the host rate up front; doing it
+    // here costs nothing extra — the interpolating read below was already a
+    // resampler — and avoids interpolating the audio twice.
+    const double rateRatio = static_cast<double> (sample->sampleRate) / sampleRate_;
+    pitchRatio_ = std::pow (2.0, static_cast<double> (cents) / 1200.0) * rateRatio;
 
     panGains (sample->pan, gainLeft_, gainRight_);
     staticGain_ = juce::Decibels::decibelsToGain (-sample->attenuationDb);
@@ -234,7 +242,7 @@ void Voice::kill() noexcept
 
 float Voice::nextSample() noexcept
 {
-    const auto& data = sample_->data;
+    const auto& data = *sample_->data;
     const auto sampleCount = data.size();
 
     if (sampleCount < 2)
@@ -256,10 +264,21 @@ float Voice::nextSample() noexcept
         // neighbour, so the loop cannot be allowed to land on it.
         const auto loopEnd = juce::jmin (static_cast<double> (sample_->loopEnd),
                                          static_cast<double> (sampleCount - 1));
-        const auto loopLength = static_cast<double> (sample_->loopEnd - sample_->loopStart);
+        // Clamping can collapse an out-of-range loop down to loopStart or
+        // below; there is nothing left to wrap in that case, and a zero or
+        // negative length would spin the wrap forever. Fall through so the
+        // end-of-data check below deactivates the voice instead.
+        if (loopEnd > static_cast<double> (sample_->loopStart))
+        {
+            // The length must be measured from the same clamped end the wrap
+            // uses. Using the raw loopEnd here lets a loop that ends on the
+            // last frame wrap phase_ past loopStart and negative, which turns
+            // into a huge index on the way into the interpolator below.
+            const auto loopLength = loopEnd - static_cast<double> (sample_->loopStart);
 
-        while (phase_ >= loopEnd)
-            phase_ -= loopLength;
+            while (phase_ >= loopEnd)
+                phase_ -= loopLength;
+        }
     }
 
     if (phase_ >= static_cast<double> (sampleCount - 1))
@@ -281,7 +300,7 @@ float Voice::nextSample() noexcept
 void Voice::render (float* dryL, float* dryR, float* wetL, float* wetR,
                     int numSamples, const VoiceSettings& settings) noexcept
 {
-    if (! active_ || sample_ == nullptr || sample_->data.empty())
+    if (! active_ || sample_ == nullptr || sample_->data == nullptr || sample_->data->empty())
         return;
 
     // Velocity shifts drive around the knob position rather than scaling it, so
