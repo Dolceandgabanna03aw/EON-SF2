@@ -148,7 +148,6 @@ void Knob::mouseDrag (const juce::MouseEvent& e)
     const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
-    repaint();
 }
 
 void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
@@ -156,7 +155,6 @@ void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetail
     const auto range = param_.getNormalisableRange();
     const float step = (range.end - range.start) / 100.0f;
     slider_.setValue (slider_.getValue() + (float) wheel.deltaY * step, juce::sendNotificationSync);
-    repaint();
 }
 
 // ============================================================================
@@ -412,13 +410,11 @@ void Stepper::mouseDrag (const juce::MouseEvent& e)
     const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
-    repaint();
 }
 
 void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
 {
     slider_.setValue (slider_.getValue() + (float) wheel.deltaY, juce::sendNotificationSync);
-    repaint();
 }
 
 // ============================================================================
