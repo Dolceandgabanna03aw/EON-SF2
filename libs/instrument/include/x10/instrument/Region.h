@@ -91,6 +91,13 @@ struct Region
 
     [[nodiscard]] bool matches (int key, int velocity) const noexcept
     {
+        // Pinned regions (genKeynum/genVelocity) match only the exact key or
+        // velocity they are fixed to, regardless of the nominal range.
+        if (keyOverride >= 0 && keyOverride != key)
+            return false;
+        if (velocityOverride >= 0 && velocityOverride != velocity)
+            return false;
+
         return key >= keyLow && key <= keyHigh
             && velocity >= velocityLow && velocity <= velocityHigh;
     }

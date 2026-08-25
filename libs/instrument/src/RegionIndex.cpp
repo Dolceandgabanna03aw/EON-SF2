@@ -108,6 +108,16 @@ std::size_t RegionIndex::match (std::size_t presetIndex, int key, int velocity,
     {
         const auto& region = preset.regions[regionIndex];
 
+        // A region pinned by genKeynum/genVelocity matches only that exact
+        // key/velocity, regardless of its keyLow/keyHigh range. Without this,
+        // a pinned region (e.g. a drum sound fixed to one key) would also fire
+        // on every other key inside its range, and a region whose pin sits
+        // outside its nominal range would never fire at all.
+        if (region.keyOverride >= 0 && region.keyOverride != key)
+            continue;
+        if (region.velocityOverride >= 0 && region.velocityOverride != velocity)
+            continue;
+
         if (velocity < region.velocityLow || velocity > region.velocityHigh)
             continue;
 

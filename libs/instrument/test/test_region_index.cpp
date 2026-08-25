@@ -267,3 +267,61 @@ TEST_CASE ("match() performs no heap allocation", "[instrument][regionindex]")
 
     REQUIRE (scope.allocationsSoFar() == 0);
 }
+
+TEST_CASE ("a region pinned by keyOverride matches only that key", "[instrument][regionindex]")
+{
+    // A drum region fixed to key 60 (genKeynum) with a full key range: without
+    // the override check it would also fire on every other key in 0..127.
+    Region drum = makeRegion (0, 127);
+    drum.keyOverride = 60;
+
+    std::vector<Preset> presets;
+    presets.push_back (makePreset ("Drums", 0, 0, { drum }));
+
+    RegionIndex index { std::move (presets) };
+    const auto presetIndex = *index.findPresetIndex (0, 0);
+
+    std::array<const Region*, 4> out {};
+
+    REQUIRE (index.match (presetIndex, 60, 100, out) == 1);  // the pinned key
+    REQUIRE (index.match (presetIndex, 61, 100, out) == 0);  // other keys: silent
+    REQUIRE (index.match (presetIndex, 0,  100, out) == 0);
+    REQUIRE (index.match (presetIndex, 127, 100, out) == 0);
+}
+
+TEST_CASE ("a region pinned by velocityOverride matches only that velocity", "[instrument][regionindex]")
+{
+    Region region = makeRegion (0, 127);
+    region.velocityOverride = 100;
+
+    std::vector<Preset> presets;
+    presets.push_back (makePreset ("PinnedVel", 0, 0, { region }));
+
+    RegionIndex index { std::move (presets) };
+    const auto presetIndex = *index.findPresetIndex (0, 0);
+
+    std::array<const Region*, 4> out {};
+
+    REQUIRE (index.match (presetIndex, 60, 100, out) == 1); // the pinned velocity
+    REQUIRE (index.match (presetIndex, 60, 99,  out) == 0); // others: silent
+    REQUIRE (index.match (presetIndex, 60, 101, out) == 0);
+}
+
+TEST_CASE ("Region::matches honours keyOverride and velocityOverride", "[instrument][regionindex]")
+{
+    Region region = makeRegion (10, 20);
+    region.keyOverride      = 15;
+    region.velocityOverride = 64;
+
+    REQUIRE (region.matches (15, 64));  // both pins hit
+    REQUIRE (! region.matches (15, 65)); // velocity pin misses
+    REQUIRE (! region.matches (14, 64)); // key pin misses
+    REQUIRE (! region.matches (9, 64));  // key below nominal range
+    REQUIRE (! region.matches (21, 64)); // key above nominal range
+
+    // Defaults (-1) keep the plain range behaviour.
+    Region plain = makeRegion (10, 20);
+    REQUIRE (plain.matches (10, 0));
+    REQUIRE (plain.matches (20, 127));
+    REQUIRE (! plain.matches (9, 0));
+}
