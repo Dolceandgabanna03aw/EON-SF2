@@ -66,6 +66,31 @@ endif()
 target_compile_options(EONDS50 PRIVATE -Wall -Wextra -Wpedantic -Werror -Wshadow)
 
 # --------------------------------------------------------------------------
+# Bundled SoundFont
+#
+# The M1 Legacy SoundFont is shipped inside the plugin bundle's
+# Contents/Resources directory so the plugin is immediately playable without a
+# manual Load step. The processor looks for the first *.sf2 there at startup.
+# --------------------------------------------------------------------------
+set(EONDS50_BUNDLED_SF2
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../testdata/sf2/Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2")
+
+if(APPLE AND EXISTS "${EONDS50_BUNDLED_SF2}")
+    foreach(fmt VST3 AU)
+        if(TARGET EONDS50_${fmt})
+            add_custom_command(TARGET EONDS50_${fmt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${EONDS50_BUNDLED_SF2}"
+                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources/"
+                COMMENT "Bundling SoundFont into ${fmt}"
+                VERBATIM)
+        endif()
+    endforeach()
+endif()
+
+# --------------------------------------------------------------------------
 # Ad-hoc signing
 #
 # macOS refuses to load an unsigned component, and only an "Apple Development"

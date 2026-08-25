@@ -1,6 +1,13 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <juce_core/juce_core.h>
+
+#if JUCE_MAC
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#endif
+
 namespace aod
 {
 
@@ -16,6 +23,10 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
 {
     sampleRate_ = sampleRate;
     voicePool_ = std::make_unique<VoicePool>();
+
+    // Surface the bundled SoundFont so the plugin starts usable without a
+    // manual Load step when the packaged font is present.
+    loadBundledSoundFont();
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     fxProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
@@ -43,6 +54,11 @@ void RomplerProcessor::releaseResources()
     activeLoader_.store (nullptr, std::memory_order_relaxed);
     if (sf2Loader_)
         retiredLoaders_.push_back (std::move (sf2Loader_));
+
+    // A fresh prepareToPlay() may come with the bundle now present (late
+    // install) or a different font packaged, so allow the bundled font to be
+    // offered again on the next audio start.
+    bundledFontLoaded_ = false;
 
     voicePool_.reset();
 }
@@ -214,6 +230,61 @@ void RomplerProcessor::loadSoundFont(const juce::File& file)
     if (sf2Loader_)
         retiredLoaders_.push_back (std::move (sf2Loader_));
     sf2Loader_ = std::move (newLoader);
+}
+
+// ---------------------------------------------------------------------------
+// Bundled SoundFont
+// ---------------------------------------------------------------------------
+//
+// At build time the packaged VST3/AU bundle is given an .sf2 alongside its
+// moduleinfo.json, inside Contents/Resources. On macOS the plugin binary lives
+// at <bundle>/Contents/MacOS/<name>, so the Resources sibling is found by
+// walking up. The bundled font is offered during prepareToPlay() so a host that
+// loads the plugin is immediately playable without a manual Load step.
+namespace
+{
+    juce::File pathForBundledSoundFont()
+    {
+#if JUCE_MAC
+        // Locate this module's own path with dladdr and walk up from
+        // <bundle>/Contents/MacOS/<name> to <bundle>/Contents/Resources. This
+        // works in every host because it does not depend on which bundle the
+        // host considers "main".
+        Dl_info info;
+        if (dladdr (reinterpret_cast<void*> (&pathForBundledSoundFont), &info) == 0
+            || info.dli_fname == nullptr)
+            return {};
+
+        juce::File resourcesDir = juce::File (juce::String (info.dli_fname))
+                                      .getParentDirectory()   // Contents/MacOS
+                                      .getParentDirectory()   // Contents
+                                      .getChildFile ("Resources");
+        for (auto& entry : juce::RangedDirectoryIterator (resourcesDir, false))
+            if (entry.getFile().hasFileExtension (".sf2"))
+                return entry.getFile();
+
+        return {};
+#else
+        // Non-macOS packaging does not yet bundle an SF2.
+        return {};
+#endif
+    }
+} // namespace
+
+void RomplerProcessor::loadBundledSoundFont()
+{
+    if (bundledFontLoaded_)
+        return;
+
+    const juce::File file = pathForBundledSoundFont();
+    if (file.existsAsFile())
+    {
+        loadSoundFont (file);
+        // Only latch once the font is actually loaded. A failed or absent
+        // bundle must be retried on the next prepareToPlay() (e.g. the host
+        // restarts audio, or the bundle appears after a late install).
+        bundledFontLoaded_ = (sf2Loader_ != nullptr);
+    }
 }
 
 int RomplerProcessor::getPresetCount() const noexcept

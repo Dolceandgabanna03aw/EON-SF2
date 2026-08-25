@@ -60,6 +60,15 @@ public:
     */
     void loadSoundFont (const juce::File& file);
 
+    /**
+        Loads the SoundFont bundled inside the plugin bundle's Contents/Resources
+        directory, if one is present. Called from prepareToPlay() on the message
+        thread so the plugin starts already usable without a manual Load step.
+        No-op when the bundle has no .sf2 resource (e.g. release builds without
+        the bundled font, the ui_shot tool, the standalone build, or local dev).
+    */
+    void loadBundledSoundFont();
+
     [[nodiscard]] juce::String getLoadedFileName() const noexcept { return loadedFileName_; }
 
     [[nodiscard]] int getPresetCount() const noexcept;
@@ -104,6 +113,9 @@ private:
     std::atomic<int> currentBank_ { 0 };
     std::atomic<int> currentProgram_ { 0 };
     std::atomic<float> lastPeak_ { 0.0f };
+
+    /** Set once the bundled font has been offered up; see loadBundledSoundFont(). */
+    bool bundledFontLoaded_ = false;
 
     // Message-thread -> audio-thread note events. Bounded; if the host is not
     // running we drop rather than grow unbounded.

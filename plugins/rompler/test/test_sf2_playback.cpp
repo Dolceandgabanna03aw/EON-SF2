@@ -21,8 +21,10 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
 
     aod::SF2Loader loader (static_cast<int> (kSampleRate));
     REQUIRE (loader.loadFile (testSf2File()));
+    REQUIRE (loader.presetCount() > 0);
 
-    aod::Sample* sample = loader.getSample (0, 33, 60, 100);
+    const auto [bank, program] = loader.firstPresetProgram();
+    aod::Sample* sample = loader.getSample (bank, program, 60, 100);
     REQUIRE (sample != nullptr);
     REQUIRE (! sample->data.empty());
 }
@@ -37,9 +39,22 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
     processor.prepareToPlay (kSampleRate, kBlockSize);
     processor.loadSoundFont (testSf2File());
 
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (testSf2File()));
+    const auto [bank, program] = loader.firstPresetProgram();
+
+    // Find a midi key that the first preset actually voices, so the block is
+    // non-silent regardless of which font is bundled or how regions are pinned.
+    int soundingKey = -1;
+    for (int key = 0; key < 128 && soundingKey < 0; ++key)
+        if (loader.getSample (bank, program, key, 100) != nullptr)
+            soundingKey = key;
+    REQUIRE (soundingKey >= 0);
+    processor.selectPreset (bank, program);
+
     juce::AudioBuffer<float> buffer (2, kBlockSize);
     juce::MidiBuffer midi;
-    midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (100)), 0);
+    midi.addEvent (juce::MidiMessage::noteOn (1, soundingKey, static_cast<juce::uint8> (100)), 0);
 
     processor.processBlock (buffer, midi);
 
