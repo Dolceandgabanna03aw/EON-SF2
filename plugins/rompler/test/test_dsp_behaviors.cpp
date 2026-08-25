@@ -124,3 +124,46 @@ TEST_CASE ("a released voice is reusable for a new note", "[dsp][voice]")
     pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
+
+TEST_CASE ("retriggering a held note reuses its voice instead of stacking", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+
+    // Hold note 60, then re-strike it (legato retrigger). The first voice must
+    // be reset in place, so the pool does not burn a fresh slot per strike.
+    pool.setPolyphony (1);
+    pool.start (&sample, 60, 0.5f);
+    pool.start (&sample, 60, 0.9f); // retrigger while still held
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    // With polyphony 1, a stacked voice would have been dropped and produced
+    // silence; retriggering in place must still sound.
+    REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
+}
+
+TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+
+    // Note 60 grabs the only slot, then releases and finishes its fade.
+    pool.start (&sample, 60, 0.5f);
+    pool.stop (60);
+    for (int b = 0; b < 64; ++b)
+    {
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    }
+
+    // The slot is recycled for note 62. A late note-off for 60 must not
+    // silence the voice that is now actually playing 62.
+    pool.start (&sample, 62, 0.5f);
+    pool.stop (60); // stale note-off for a note that is no longer sounding
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
+}
