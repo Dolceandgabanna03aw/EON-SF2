@@ -11,6 +11,7 @@
 add_library(x10_instrument STATIC
     src/RegionIndex.cpp)
 add_library(x10::instrument ALIAS x10_instrument)
+set_target_properties(x10_instrument PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(x10_instrument PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(x10_instrument PUBLIC cxx_std_20)
