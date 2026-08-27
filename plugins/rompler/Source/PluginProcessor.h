@@ -18,6 +18,8 @@ namespace aod
 class RomplerProcessor final : public juce::AudioProcessor
 {
 public:
+    using juce::AudioProcessor::processBlock;
+
     RomplerProcessor();
     ~RomplerProcessor() override = default;
 

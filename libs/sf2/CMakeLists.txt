@@ -11,6 +11,7 @@ add_library(x10_sf2 STATIC
     src/Sf2Reader.cpp
     src/Sf2Flattener.cpp)
 add_library(x10::sf2 ALIAS x10_sf2)
+set_target_properties(x10_sf2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(x10_sf2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(x10_sf2 PUBLIC cxx_std_20)
