@@ -624,3 +624,68 @@ TEST_CASE ("voice retirement during polyphony reduction", "[lifetime][polyphony]
     // Active count should drop
     REQUIRE (pool.activeVoiceCount() <= 32);
 }
+
+TEST_CASE ("legato retarget to shorter sample does not OOB", "[dsp][legato][oob]")
+{
+    aod::Sample longSample;
+    longSample.data.assign (2400, 0.5f);
+    longSample.sampleRate = kSampleRate;
+    longSample.loopStart = 100;
+    longSample.loopEnd = 2000;
+    longSample.loopEnabled = true;
+    
+    aod::Sample shortSample;
+    shortSample.data.assign (16, 0.5f);
+    shortSample.sampleRate = kSampleRate;
+    shortSample.loopStart = 0;
+    shortSample.loopEnd = 15;
+    shortSample.loopEnabled = true;
+    
+    aod::VoicePool pool (1);
+    pool.setLegatoEnabled (true);
+    pool.start (&longSample, 60, 1.0f);
+    
+    std::vector<float> block (512);
+    for (int i = 0; i < 10; ++i)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), 512, kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f);
+    }
+    
+    pool.start (&shortSample, 61, 1.0f);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 512, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f);
+    
+    REQUIRE (pool.voiceIndexForNote (61) == 0);
+}
+
+TEST_CASE ("polyphony shrink clears high-index voices", "[dsp][polyphony]")
+{
+    aod::Sample sample = makeTone();
+    aod::VoicePool pool (128);
+    
+    std::vector<float> block (512);
+    
+    for (int note = 0; note < 128; ++note)
+        pool.start (&sample, note, 1.0f);
+    
+    REQUIRE (pool.activeVoiceCount() == 128);
+    
+    pool.setPolyphony (32);
+    
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 512, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+    
+    REQUIRE (pool.activeVoiceCount() <= 32);
+    
+    pool.setPolyphony (128);
+    
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 512, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+    
+    REQUIRE (pool.activeVoiceCount() <= 32);
+}
