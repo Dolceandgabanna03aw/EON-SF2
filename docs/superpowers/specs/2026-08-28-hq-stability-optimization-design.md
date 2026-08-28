@@ -1,7 +1,7 @@
 # EON SF2 HQ, Stability, and Optimization Design
 
 **Date:** 2026-08-28
-**Status:** Approved direction; written specification pending user review
+**Status:** Approved 2026-08-29
 **Scope:** Playback fidelity, real-time correctness, CPU and memory efficiency, safe preset/SoundFont transitions, and measurable release validation
 
 ## Goal
