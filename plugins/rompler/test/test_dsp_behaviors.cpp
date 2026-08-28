@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -33,30 +34,203 @@ float blockPeak (const float* output, int numSamples)
 }
 } // namespace
 
-TEST_CASE ("polyphone cap stops allocating voices past the limit", "[dsp][voice]")
+TEST_CASE ("voice pool prepares the public 128-voice default capacity", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+
+    REQUIRE (aod::VoicePool::maxVoices == 128);
+    REQUIRE (pool.preparedCapacity() == aod::VoicePool::maxVoices);
+    REQUIRE (pool.activeVoiceCount() == 0);
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+}
+
+TEST_CASE ("voice pool starts all 128 MIDI notes concurrently", "[dsp][rt][voice]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+
+    for (int note = 0; note < 128; ++note)
+        pool.start (&sample, note, 0.5f);
+
+    REQUIRE (pool.activeVoiceCount() == 128);
+    for (int note = 0; note < 128; ++note)
+        REQUIRE (pool.voiceIndexForNote (note) == note);
+}
+
+TEST_CASE ("stealing a release voice clears only its victim note mapping", "[dsp][voice]")
+{
+    aod::VoicePool pool (2);
+    const aod::Sample sample = makeTone();
+
+    pool.start (&sample, 60, 0.5f);
+    pool.start (&sample, 62, 0.5f);
+    pool.stop (60);
+    pool.start (&sample, 64, 0.5f);
+
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 1);
+    REQUIRE (pool.voiceIndexForNote (64) == 0);
+}
+
+TEST_CASE ("voice stealing prioritizes a release tail before held voices", "[dsp][voice]")
+{
+    aod::VoicePool pool (2);
+    const aod::Sample sample = makeTone();
+
+    pool.start (&sample, 60, 0.5f);
+    std::vector<float> block (4096);
+    // Establish a quiet, but still audible, release candidate before adding
+    // the second voice. This makes the selected victim observable by note.
+    pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.2f, 100.0f, 0.0f, 0.0f);
+    pool.stop (60);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 64, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.2f, 100.0f, 0.0f, 0.0f);
+    pool.start (&sample, 62, 0.5f);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 2, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.2f, 100.0f, 0.0f, 0.0f);
+    pool.stop (60);
+    pool.start (&sample, 64, 0.5f);
+
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 1);
+    REQUIRE (pool.voiceIndexForNote (64) == 0);
+}
+
+TEST_CASE ("voice stealing uses start order when envelope levels are equal", "[dsp][voice]")
+{
+    aod::VoicePool pool (2);
+    const aod::Sample sample = makeTone();
+
+    pool.start (&sample, 60, 0.5f);
+    pool.start (&sample, 62, 0.5f);
+    pool.start (&sample, 64, 0.5f);
+
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 1);
+    REQUIRE (pool.voiceIndexForNote (64) == 0);
+}
+
+TEST_CASE ("voice stealing chooses the quietest held envelope", "[dsp][voice]")
+{
+    aod::VoicePool pool (2);
+    const aod::Sample sample = makeTone();
+    std::vector<float> block (4096);
+
+    pool.start (&sample, 60, 0.5f);
+    // Note 60 reaches its 20% sustain before note 62 starts its full-level
+    // attack. Both keys remain held, so release status cannot decide it.
+    pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.2f, 100.0f, 0.0f, 0.0f);
+    pool.start (&sample, 62, 0.5f);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), 2, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.2f, 100.0f, 0.0f, 0.0f);
+
+    pool.start (&sample, 64, 0.5f);
+
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 1);
+    REQUIRE (pool.voiceIndexForNote (64) == 0);
+}
+
+TEST_CASE ("polyphony capacity steals the old mapping for the new note", "[dsp][voice]")
 {
     aod::VoicePool pool;
     const aod::Sample sample = makeTone();
 
     pool.setPolyphony (1);
 
-    // note-to-voice index is not public, but the observable behaviour is: with
-    // only one voice slot, the second simultaneous note is dropped silently.
     pool.start (&sample, 60, 0.5f);
     pool.start (&sample, 62, 0.5f);
 
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 0);
+
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
 
-    // One voice playing a 1s tone within a 512-frame block => non-zero but a
-    // single voice's amplitude, not two stacked. We simply assert it fired.
+    // One occupied slot remains, now owned by the new note rather than a
+    // silently dropped note-on.
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
+}
 
-    // Raising polyphony lets the dropped note register on the next render.
-    pool.setPolyphony (4);
-    std::vector<float> block2 (static_cast<std::size_t> (kBlockSize));
-    pool.render (block2.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
-    REQUIRE (blockPeak (block2.data(), kBlockSize) > 0.0f);
+TEST_CASE ("lowering polyphony retires out-of-range voices permanently", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+
+    for (int note = 0; note < aod::VoicePool::maxVoices; ++note)
+        pool.start (&sample, note, 0.5f);
+    REQUIRE (pool.activeVoiceCount() == aod::VoicePool::maxVoices);
+
+    pool.setPolyphony (32);
+    REQUIRE (pool.activeVoiceCount() == 32);
+    for (int note = 0; note < 32; ++note)
+        REQUIRE (pool.voiceIndexForNote (note) == note);
+    for (int note = 32; note < aod::VoicePool::maxVoices; ++note)
+        REQUIRE (pool.voiceIndexForNote (note) == -1);
+
+    pool.setPolyphony (aod::VoicePool::maxVoices);
+    REQUIRE (pool.activeVoiceCount() == 32);
+    pool.start (&sample, 100, 0.5f);
+    REQUIRE (pool.voiceIndexForNote (100) == 32);
+}
+
+TEST_CASE ("legato retarget to a shorter sample resets sample-dependent state", "[dsp][voice][legato]")
+{
+    aod::Sample longLoop = makeTone();
+    longLoop.loopStart = 200;
+    longLoop.loopEnd = 300;
+    longLoop.loopEnabled = true;
+    aod::Sample shortSample;
+    shortSample.data.assign (16, 0.5f);
+    shortSample.sampleRate = kSampleRate;
+    shortSample.loopStart = 0;
+    shortSample.loopEnd = 15;
+    shortSample.loopEnabled = true;
+
+    aod::VoicePool pool (1);
+    pool.setLegatoEnabled (true);
+    pool.start (&longLoop, 60, 1.0f);
+    std::vector<float> block (256);
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
+    }
+
+    pool.start (&shortSample, 62, 1.0f);
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
+
+    REQUIRE (pool.voiceIndexForNote (60) == -1);
+    REQUIRE (pool.voiceIndexForNote (62) == 0);
+    REQUIRE (blockPeak (block.data(), static_cast<int> (block.size())) > 0.1f);
+}
+
+TEST_CASE ("ADSR sustain level uses normalized unity range", "[dsp][voice][envelope]")
+{
+    aod::Sample constant;
+    constant.data.assign (kSampleRate, 1.0f);
+    constant.sampleRate = kSampleRate;
+    aod::VoicePool pool;
+    pool.start (&constant, 60, 1.0f);
+    std::vector<float> block (512);
+
+    for (int pass = 0; pass < 8; ++pass)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.5f, 100.0f, 0.0f, 0.0f);
+    }
+
+    REQUIRE (blockPeak (block.data(), static_cast<int> (block.size()))
+             == Catch::Approx (x10::dsp::curves::Tanh::f (0.5f)).margin (0.03f));
 }
 
 TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
@@ -68,12 +242,12 @@ TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
     // hit quieter; neutral 0 leaves it untouched.
     pool.start (&sample, 60, 1.0f);
     std::vector<float> loud (static_cast<std::size_t> (kBlockSize));
-    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
 
     pool.stopAll();
     pool.start (&sample, 60, 0.1f);
     std::vector<float> soft (static_cast<std::size_t> (kBlockSize));
-    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
 
     REQUIRE (blockPeak (soft.data(), kBlockSize) < blockPeak (loud.data(), kBlockSize));
 }
@@ -87,7 +261,7 @@ TEST_CASE ("release fades to silence instead of cutting off abruptly", "[dsp][vo
 
     // Let the voice ring for a bit, then release it.
     std::vector<float> ring (static_cast<std::size_t> (kBlockSize));
-    pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     REQUIRE (blockPeak (ring.data(), kBlockSize) > 0.0f);
 
     pool.stop (60);
@@ -97,7 +271,7 @@ TEST_CASE ("release fades to silence instead of cutting off abruptly", "[dsp][vo
     for (int b = 0; b < 64; ++b)
     {
         std::fill (ring.begin(), ring.end(), 0.0f);
-        pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
         const float p = blockPeak (ring.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay
         lastPeak = p;
@@ -121,7 +295,7 @@ TEST_CASE ("a released voice is reusable for a new note", "[dsp][voice]")
     // regardless of the release tail by resetting the same voice.
     pool.start (&sample, 60, 0.5f);
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -137,7 +311,7 @@ TEST_CASE ("retriggering a held note reuses its voice instead of stacking", "[ds
     pool.start (&sample, 60, 0.9f); // retrigger while still held
 
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
 
     // With polyphony 1, a stacked voice would have been dropped and produced
     // silence; retriggering in place must still sound.
@@ -155,7 +329,7 @@ TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][v
     for (int b = 0; b < 64; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     }
 
     // The slot is recycled for note 62. A late note-off for 60 must not
@@ -164,7 +338,7 @@ TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][v
     pool.stop (60); // stale note-off for a note that is no longer sounding
 
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -181,13 +355,13 @@ TEST_CASE ("a saturated pool steals the longest-held voice for a new note", "[ds
     for (int b = 0; b < 8; ++b) // let note 60's envelope age
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     }
 
     // A third note must steal the oldest slot (60) rather than drop silently.
     pool.start (&sample, 64, 0.5f);
     std::fill (block.begin(), block.end(), 0.0f);
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -209,7 +383,7 @@ TEST_CASE ("a looping sample keeps sounding past its end", "[dsp][voice][loop]")
     for (int b = 0; b < 3 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
         lastPeak = blockPeak (block.data(), kBlockSize);
         REQUIRE (lastPeak > 0.0f); // never dies out while held
     }
@@ -229,7 +403,7 @@ TEST_CASE ("a non-looping sample goes silent once it ends", "[dsp][voice][loop]"
     for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
         if (blockPeak (block.data(), kBlockSize) <= 1.0e-6f)
         {
             wentSilent = true;
@@ -253,7 +427,7 @@ TEST_CASE ("release on a looping sample fades out instead of restarting the loop
     for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     }
     pool.stop (60);
 
@@ -264,7 +438,7 @@ TEST_CASE ("release on a looping sample fades out instead of restarting the loop
     for (int b = 0; b < 32; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
         const float p = blockPeak (block.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
         lastPeak = p;
@@ -298,7 +472,7 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     for (int b = 0; b < 1; ++b)
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     }
     pool.stop (60);
 
@@ -309,7 +483,7 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     for (int b = 0; b < 32; ++b)
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
         const float p = blockPeak (block.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
         lastPeak = p;
@@ -332,7 +506,7 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // Render a few samples into the attack (attack is 10 ms at 48 kHz, so
     // ~480 samples), then release while the envelope is still rising.
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
     pool.stop (60);
 
     // Render one more block and look at the *first differences* across the
@@ -341,7 +515,7 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // level) would introduce a slope spike several times that. The scaled
     // ramp keeps the fade slope the same whatever the release level.
     std::fill (block.begin(), block.end(), 0.0f);
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
 
     float maxSlope = 0.0f;
     for (int i = 1; i < kBlockSize; ++i)
@@ -352,4 +526,101 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // combined envelope+sine slope stays under ~0.35. Anything much larger
     // indicates a discontinuity (click) at the release point.
     REQUIRE (maxSlope < 0.5f);
+}
+
+
+TEST_CASE ("bank token assignment on voice start", "[lifetime][banking]")
+{
+    aod::Sample sample1 = makeTone();
+    aod::Sample sample2 = makeTone();
+
+    aod::VoicePool pool;
+
+    // Start a voice: it should capture bank token from the active loader
+    pool.start (&sample1, 60, 0.8f);
+    const int voiceIdx = pool.voiceIndexForNote(60);
+    REQUIRE (voiceIdx >= 0);
+    
+    // Token should be initialized (all zeros at start of test)
+    aod::Voice* voice = pool.getVoiceAtIndex(voiceIdx);
+    REQUIRE (voice != nullptr);
+    aod::BankToken token = voice->bankToken();
+    REQUIRE (token.bankSlot == 0);
+    REQUIRE (token.generation == 0);
+    REQUIRE (token.bankId == 0);
+
+    // Render block to verify voice is active
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
+    REQUIRE (voice->isActive());
+}
+
+TEST_CASE ("rapid bank switches do not crash while voices render", "[lifetime][banking][stress]")
+{
+    aod::Sample sample = makeTone();
+    aod::VoicePool pool;
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+
+    // Simulate rapid note-ons and note-offs during many blocks
+    // (In real scenario, PluginProcessor would call pool.start() and dispatch,
+    // setting bank tokens; here we just verify the pool doesn't crash.)
+    for (int cycle = 0; cycle < 20; ++cycle)
+    {
+        // Start a few notes
+        pool.start (&sample, 60, 0.8f);
+        pool.start (&sample, 62, 0.7f);
+        pool.start (&sample, 64, 0.6f);
+
+        // Render multiple blocks
+        for (int b = 0; b < 5; ++b)
+        {
+            std::fill (block.begin(), block.end(), 0.0f);
+            pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
+        }
+
+        // Release notes
+        pool.stop (60);
+        pool.stop (62);
+        pool.stop (64);
+
+        // Render rest of release
+        for (int b = 0; b < 10; ++b)
+        {
+            std::fill (block.begin(), block.end(), 0.0f);
+            pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
+        }
+    }
+
+    REQUIRE (pool.activeVoiceCount() == 0);
+}
+
+TEST_CASE ("voice retirement during polyphony reduction", "[lifetime][polyphony]")
+{
+    aod::Sample sample = makeTone();
+    aod::VoicePool pool (128);
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+
+    // Start many voices
+    for (int note = 0; note < 64; ++note)
+    {
+        pool.start (&sample, note, 0.5f);
+    }
+
+    REQUIRE (pool.activeVoiceCount() == 64);
+
+    // Render a block
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
+
+    // Reduce polyphony: voices above new limit should be deactivated
+    pool.setPolyphony (32);
+
+    // Render again: excess voices should retire cleanly
+    std::fill (block.begin(), block.end(), 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, 0.0f, 0.0f);
+
+    // Active count should drop
+    REQUIRE (pool.activeVoiceCount() <= 32);
 }

@@ -2,24 +2,34 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
-#include <queue>
-#include <mutex>
+#include <cstdint>
 #include <tuple>
+#include <functional>
 
 #include "Parameters.h"
 #include "Sampler.h"
 #include "SF2Loader.h"
 #include "BusProcessor.h"
+#include "DynamicsProcessor.h"
 #include "FxProcessor.h"
+#include "PresetModel.h"
+#include "RealtimeQueue.h"
 
 namespace aod
 {
 
-class RomplerProcessor final : public juce::AudioProcessor
+enum class PresetApplyStatus
+{
+    applied,
+    soundFontMissing,
+    soundFontLoadFailed
+};
+
+class RomplerProcessor final : public juce::AudioProcessor, private juce::Timer
 {
 public:
     RomplerProcessor();
-    ~RomplerProcessor() override = default;
+    ~RomplerProcessor() override;
 
     void prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock) override;
     void releaseResources() override;
@@ -47,8 +57,48 @@ public:
 
     [[nodiscard]] juce::AudioProcessorValueTreeState& getValueTreeState() noexcept { return apvts_; }
 
+    // Test-only observability for the audio-thread-to-message-thread mailbox.
+    [[nodiscard]] float getRealtimeFilterOffsetForTesting() const noexcept
+    {
+        return realtimeFilterOffsetCents_.load (std::memory_order_relaxed);
+    }
+    [[nodiscard]] float getRealtimeBusCutoffForTesting() const noexcept
+    {
+        return realtimeBusCutoffHz_.load (std::memory_order_relaxed);
+    }
+    [[nodiscard]] int getPendingLatencyForTesting() const noexcept
+    {
+        return pendingLatencySamples_.load (std::memory_order_relaxed);
+    }
+    /** Test-only: synchronously drain the message-thread timer mailbox. */
+    void drainDeferredWorkForTesting() { timerCallback(); }
+    /**
+        Test-only seam for interleaving a new MIDI CC after timerCallback()
+        snapshots a controller mailbox but before it touches APVTS.
+    */
+    void setBeforeControllerMirrorForTesting (std::function<void()> hook)
+    {
+        beforeControllerMirrorForTesting_ = std::move (hook);
+    }
+
+    /** Capture the audible preset state; engine budget parameters are excluded. */
+    [[nodiscard]] PresetDocument capturePreset() const;
+
+    /** Apply a preset on the message thread in SoundFont -> bank -> program -> parameters order. */
+    enum class ApplyStatus { ok, soundFontMissing, soundFontLoadFailed };
+    [[nodiscard]] ApplyStatus applyPreset (const PresetDocument& document, const juce::File& resolvedSoundFont);
+    [[nodiscard]] ApplyStatus applyPreset (const PresetDocument& document);
+    void requestQuickSlot (int slot) noexcept;
+    std::function<void (int)> onQuickSlotRequested;
+
     /** Peak magnitude of the most recently rendered block, for the UI meter. */
     [[nodiscard]] float getLastPeak() const noexcept { return lastPeak_.load (std::memory_order_relaxed); }
+
+    /** Linked compressor gain reduction in positive dB, for the UI GR meter. */
+    [[nodiscard]] float getLastCompressionReductionDb() const noexcept
+    {
+        return dynamicsProcessor_.getLastGainReductionDb();
+    }
 
     /**
         Loads a SoundFont from disk and, on success, selects its first preset.
@@ -73,6 +123,7 @@ public:
     [[nodiscard]] int getActiveBankSlot() const noexcept { return activeBankSlot_.load (std::memory_order_relaxed); }
     [[nodiscard]] bool isBankLoaded (int bankSlot) const noexcept;
     [[nodiscard]] const juce::String& getBankName (int bankSlot) const noexcept { return bankNames_[static_cast<std::size_t> (bankSlot)]; }
+    [[nodiscard]] const juce::String& getBankPath (int bankSlot) const noexcept { return bankNames_[static_cast<std::size_t> (bankSlot)]; }
 
     /**
         Loads the SoundFont bundled inside the plugin bundle's Contents/Resources
@@ -110,10 +161,143 @@ public:
     */
     void postNote (int note, bool on, int velocity = 100);
 
+    /**
+        Returns and clears whether a UI-note queue overflow was recovered on
+        the audio thread. Call from the message thread to show non-modal UI.
+    */
+    [[nodiscard]] bool consumeUiNoteQueueOverflow() noexcept;
+
+    // ------------------------------------------------------------------
+    // MIDI performance controls (pitch wheel, mod wheel / vibrato, sustain,
+    // legato). Host MIDI updates these directly from the audio thread; the
+    // UI wheel widgets call the "post" setters from the message thread so
+    // dragging them behaves identically to a live MIDI controller. Both
+    // paths write the same lock-free atomics that processBlock() reads, so
+    // there is exactly one source of truth for the DSP either way.
+    // ------------------------------------------------------------------
+
+    /** UI pitch-wheel drag: value in [-1, 1], springs back to 0 on release. */
+    void postPitchWheel (float normalizedValue) noexcept;
+    /** UI mod-wheel drag: value in [0, 1], holds its position. */
+    void postModWheel (float normalizedValue) noexcept;
+
+    /** Current pitch bend, normalized to [-1, 1], for the UI wheel display. */
+    [[nodiscard]] float getPitchWheelNormalized() const noexcept
+    {
+        return pitchBendSemitones_.load (std::memory_order_relaxed) / kPitchBendRangeSemitones;
+    }
+    /** Current mod wheel / vibrato depth, normalized to [0, 1], for the UI display. */
+    [[nodiscard]] float getModWheelNormalized() const noexcept
+    {
+        return modWheelValue_.load (std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool isSustainHeld() const noexcept
+    {
+        return sustainHeld_.load (std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool isLegatoEnabled() const noexcept
+    {
+        return legatoEnabled_.load (std::memory_order_relaxed);
+    }
+
+    /**
+        Directory bundled inside the plugin's own package that holds the
+        packaged SoundFonts (Contents/Resources/SoundFonts on macOS). Used as
+        the FileChooser's default browsing location so a user picking a new
+        bank naturally lands on the bundled set first. Returns an invalid
+        (non-existent) File outside of a macOS bundle build.
+    */
+    [[nodiscard]] juce::File getBundledSoundFontsDirectory() const noexcept;
+
 private:
+    enum PendingAsyncFlag : unsigned int
+    {
+        mirrorFilterOffset = 1u << 0,
+        mirrorBusCutoff = 1u << 1,
+        mirrorLatency = 1u << 2,
+        quickSlot = 1u << 3
+    };
+
+    // The processor is constructed and destroyed on JUCE's message thread.
+    // This timer owns all host/UI work deferred from processBlock().
+    void timerCallback() override;
+    
+    // Drain and destroy retired SoundFont instances.
+    // Safe to call from message thread only; ensures no voice is still
+    // referencing samples from the oldest retired loader.
+    void drainRetiredLoaders() noexcept;
+    void queueAsyncFlag (unsigned int flag) noexcept;
+    void mirrorNormalizedParameter (const char* parameterId, float normalizedValue);
+    std::atomic<unsigned int> pendingAsyncFlags_ { 0 };
+    std::atomic<int> pendingQuickSlot_ { 0 };
+    std::atomic<float> pendingFilterOffsetNormalized_ { 0.5f };
+    std::atomic<float> pendingBusCutoffNormalized_ { 1.0f };
+    // The audio thread uses each generation as a seqlock: odd while it writes
+    // the snapshot, even when stable. A captured MIDI CC is authoritative
+    // until its deferred APVTS mirror is sent; JUCE's public parameter API has
+    // no atomic compare-and-set against concurrent host automation.
+    std::atomic<std::uint64_t> filterOffsetCcGeneration_ { 0 };
+    std::atomic<std::uint64_t> filterOffsetMirroredGeneration_ { 0 };
+    std::atomic<std::uint64_t> busCutoffCcGeneration_ { 0 };
+    std::atomic<std::uint64_t> busCutoffMirroredGeneration_ { 0 };
+    static constexpr int maxControllerMirrorAttempts = 4;
+    std::function<void()> beforeControllerMirrorForTesting_;
+    std::atomic<int> pendingLatencySamples_ { -1 };
     /** Cap on buffered message-thread note events; see postNote(). */
     static constexpr std::size_t maxQueuedNotes = 256;
+    struct UiNoteEvent
+    {
+        int note;
+        int velocity;
+        bool noteOn;
+    };
+    struct BlockParameters
+    {
+        float driveDb = 0.0f;
+        int curveId = 0;
+        float velToDriveDb = 0.0f;
+        int filterRouting = 0;
+        float filterOffsetCents = 0.0f;
+        int polyphony = VoicePool::maxVoices;
+        float attackMs = 0.0f;
+        float decayMs = 0.0f;
+        float sustainLevel = 100.0f;
+        float releaseMs = 0.0f;
+        float pitchBendSemitones = 0.0f;
+        float vibratoDepthCents = 0.0f;
+        float ccGain = 1.0f;
+        float pan = 0.5f;
+        float tapeDrivePercent = 0.0f;
+        float foldPercent = 0.0f;
+        float filterCutoffHz = 20000.0f;
+        float filterResonancePercent = 0.0f;
+        float compThreshold = -18.0f;
+        float compRatio = 3.0f;
+        float compAttack = 15.0f;
+        float compRelease = 180.0f;
+        float compMakeup = 0.0f;
+        float compMix = 0.0f;
+        float chorusRate = 1.0f;
+        float chorusDepth = 0.3f;
+        float chorusMix = 0.25f;
+        float reverbRoom = 0.4f;
+        float reverbDamp = 0.5f;
+        float reverbMix = 0.2f;
+        float delayMix = 0.0f;
+        float delayFeedback = 0.35f;
+        float bpm = 120.0f;
+        float outputGain = 1.0f;
+    };
+
+    void dispatchMidiMessage (const juce::MidiMessage&, SF2Loader&) noexcept;
+    void dispatchUiNote (const UiNoteEvent&, SF2Loader&) noexcept;
+    void renderRange (juce::AudioBuffer<float>&, int start, int count) noexcept;
+    void syncBlockParameters() noexcept;
     static constexpr int maxBanks = 4;
+    /** Total pitch-wheel swing in each direction, per the design spec. */
+    static constexpr float kPitchBendRangeSemitones = 2.0f;
+    /** Vibrato depth at full mod-wheel deflection (CC1 = 127). */
+    static constexpr float kMaxVibratoDepthCents = 50.0f;
 
     juce::AudioProcessorValueTreeState apvts_;
 
@@ -125,9 +309,15 @@ private:
     std::atomic<SF2Loader*> activeLoader_ { nullptr };
     std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
 
+    // Bank generation counters: incremented on each successful loadSoundFont()
+    std::array<std::atomic<std::uint32_t>, maxBanks> bankGeneration_ {};
+    std::array<std::uint64_t, maxBanks> bankFileHash_ {};
+
     std::unique_ptr<VoicePool> voicePool_;
     BusProcessor busProcessor_;
+    DynamicsProcessor dynamicsProcessor_;
     FxProcessor fxProcessor_;
+    BlockParameters blockParameters_;
     int cachedOsFactorIndex_ = 2;
     double sampleRate_ = 48000.0;
     std::atomic<int> currentBank_ { 0 };
@@ -137,10 +327,41 @@ private:
     /** Set once the bundled font has been offered up; see loadBundledSoundFont(). */
     bool bundledFontLoaded_ = false;
 
-    // Message-thread -> audio-thread note events. Bounded; if the host is not
-    // running we drop rather than grow unbounded.
-    std::queue<std::tuple<int, bool, int>> noteQueue_;
-    std::mutex noteQueueMutex_;
+    // Message-thread -> audio-thread note events. Bounded and lock-free; if
+    // the host is not running we drop rather than grow unbounded.
+    SpscQueue<UiNoteEvent, maxQueuedNotes + 1> noteQueue_;
+    std::atomic<bool> noteQueueOverflowed_ { false };
+    std::atomic<bool> uiNoteQueueOverflowDiagnostic_ { false };
+
+    // Shared MIDI-performance state (see the postXxx()/getXxx() block above).
+    // Written by processBlock() from host MIDI, and by the UI wheel widgets
+    // from the message thread; read by processBlock() every block and by the
+    // editor for wheel repaint polling. No allocation/locking on either path.
+    std::atomic<float> pitchBendSemitones_ { 0.0f };
+    std::atomic<float> modWheelValue_ { 0.0f };
+    std::atomic<bool> sustainHeld_ { false };
+    std::atomic<bool> legatoEnabled_ { false };
+
+    // CC7 (master volume), CC11 (expression) and CC10 (pan). Persist across
+    // blocks like real hardware controllers; audio-thread only, so plain
+    // members rather than atomics are sufficient (the UI does not read or
+    // drive these directly, only host MIDI does).
+    float masterVolumeCc7_ = 1.0f;
+    float expressionCc11_ = 1.0f;
+    float panCc10_ = 0.5f;
+
+    // CC71/74 update these immediately in the audio callback. Until their
+    // deferred APVTS mirrors land, syncBlockParameters keeps these values
+    // instead of reapplying the stale host-side parameter value.
+    std::atomic<float> realtimeFilterOffsetCents_ { 0.0f };
+    std::atomic<float> realtimeBusCutoffHz_ { 20000.0f };
+
+    // Mirrors the voiceLegato APVTS param at the block boundary, the same
+    // pattern as cachedOsFactorIndex_: a UI/automation change to the param is
+    // applied to legatoEnabled_ once per block, while a live CC65 message
+    // updates legatoEnabled_ (and this cache) immediately without ever
+    // writing back to the APVTS from the audio thread.
+    int cachedLegatoParamValue_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)
 };

@@ -12,6 +12,25 @@
 
 namespace aod
 {
+/**
+    Lightweight bank-generation token passed by value to Voice.
+    Allows deferred cleanup of retired SoundFont instances without
+    holding reference-counted pointers in the audio thread.
+*/
+struct BankToken
+{
+    int bankSlot = 0;
+    std::uint32_t generation = 0;
+    std::uint64_t bankId = 0;
+    
+    [[nodiscard]] bool operator==(const BankToken& other) const noexcept
+    {
+        return bankSlot == other.bankSlot 
+            && generation == other.generation
+            && bankId == other.bankId;
+    }
+};
+
 
 struct Sample
 {
@@ -34,6 +53,16 @@ class Voice
 {
 public:
     void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    /**
+        Legato retarget: changes the sounding note/pitch of an already-active
+        voice without resetting the envelope, phase or loop state. Used when
+        CC65 (legato) is held and a new key is pressed while another is still
+        down, so the pitch glides on the same voice instead of a fresh attack.
+        No-op if the voice is not currently active.
+    */
+    void retarget(const Sample* sample, int midiNote) noexcept;
+    /** Immediately retires the slot and clears its current note ownership. */
+    void retire() noexcept;
     /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
@@ -43,10 +72,20 @@ public:
     [[nodiscard]] int note() const noexcept { return midiNote_; }
     /** How far the envelope has run; used to pick the oldest voice when stealing. */
     [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
+    /** Current ADSR level, updated per rendered sample for deterministic stealing. */
+    [[nodiscard]] float envelopeLevel() const noexcept { return envelopeLevel_; }
+    /** Monotonic sequence assigned by VoicePool on every fresh attack. */
+    [[nodiscard]] std::uint64_t startSequence() const noexcept { return startSequence_; }
+    void setStartSequence(std::uint64_t sequence) noexcept { startSequence_ = sequence; }
+    
+    /** Bank token at the time voice was started; used for deferred cleanup. */
+    [[nodiscard]] BankToken bankToken() const noexcept { return bankToken_; }
+    void setBankToken(const BankToken& token) noexcept { bankToken_ = token; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
-                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
+                float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                float pitchBendSemitones, float vibratoDepthCents) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -55,6 +94,14 @@ private:
     bool active_ = false;
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
+    float envelopeLevel_ = 0.0f;
+    BankToken bankToken_;
+    std::uint64_t startSequence_ = 0;
+
+    // Per-voice vibrato LFO phase, in radians. Advances at a fixed musical
+    // rate (see kVibratoRateHz in Sampler.cpp) independent of pitch bend;
+    // reset on start() so every fresh attack begins at a consistent phase.
+    double vibratoPhase_ = 0.0;
 
     x10::dsp::Adsr adsr_;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
@@ -70,8 +117,13 @@ private:
 
     // Playback rate in source frames per output sample. 1.0 plays the sample at
     // its recorded pitch; a higher MIDI note advances faster, a lower one
-    // slower. Computed once at start() from the note, rootKey and tunings.
+    // slower. Computed once at start()/retarget() from the note, rootKey and
+    // tunings. Pitch bend and vibrato are applied as an additional per-sample
+    // multiplier inside render(), never baked into this cached rate, so a
+    // live wheel/CC1 change takes effect immediately without a fresh attack.
     double playRate_ = 1.0;
+
+    [[nodiscard]] double computePlayRate(const Sample* sample, int midiNote) const noexcept;
 
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
@@ -81,9 +133,26 @@ private:
 class VoicePool
 {
 public:
-    static constexpr int maxVoices = 32;
+    static constexpr int maxVoices = 128;
 
-    explicit VoicePool(int numVoices = maxVoices) : voices_(static_cast<std::size_t>(numVoices)) {}
+    explicit VoicePool(int numVoices = maxVoices)
+        : voices_(static_cast<std::size_t>(juce::jmax (1, numVoices)))
+        , polyphony_(static_cast<int>(voices_.size()))
+    {
+        noteToVoice_.fill (-1);
+    }
+
+    [[nodiscard]] int activeVoiceCount() const noexcept;
+    [[nodiscard]] int voiceIndexForNote(int midiNote) const noexcept;
+    [[nodiscard]] int preparedCapacity() const noexcept { return static_cast<int>(voices_.size()); }
+    
+    /** Provide direct access to a voice by index for setting bankToken; audio-thread only. */
+    [[nodiscard]] Voice* getVoiceAtIndex(int voiceIndex) noexcept
+    {
+        if (voiceIndex < 0 || voiceIndex >= static_cast<int>(voices_.size()))
+            return nullptr;
+        return &voices_[static_cast<std::size_t>(voiceIndex)];
+    }
 
     /** Caps the number of concurrently playing voices. Call from the audio thread. */
     void setPolyphony(int numVoices) noexcept;
@@ -92,14 +161,46 @@ public:
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
+    /**
+        CC64 sustain pedal state. While held, note-offs are deferred (the
+        voice keeps sounding) instead of releasing immediately; releasing the
+        pedal flushes every deferred note-off. Call from the audio thread only.
+    */
+    void setSustainHeld(bool held) noexcept;
+
+    /**
+        CC65 legato state. While enabled and at least one key is already held,
+        a new note-on retargets the currently sounding lead voice instead of
+        triggering a fresh envelope. Call from the audio thread only.
+    */
+    void setLegatoEnabled(bool enabled) noexcept;
+
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
-                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
+                float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                float pitchBendSemitones, float vibratoDepthCents) noexcept;
 
 private:
     std::vector<Voice> voices_;
     std::array<int, 128> noteToVoice_ {};
-    int polyphony_ = static_cast<int>(voices_.size());
+    int polyphony_ = 0;
+    std::uint64_t nextStartSequence_ = 0;
+
+    bool sustainHeld_ = false;
+    bool legatoEnabled_ = false;
+    // Keys currently physically held down (independent of sustain pedal),
+    // used to decide whether a legato retarget is possible.
+    std::array<bool, 128> keyHeld_ {};
+    int heldKeyCount_ = 0;
+    // Notes whose note-off was deferred because the sustain pedal was held.
+    std::array<bool, 128> pendingRelease_ {};
+    // Index of the most recently triggered/retargeted voice, used as the
+    // legato "lead voice" target for the next retarget.
+    int leadVoiceIndex_ = -1;
+
+    void releaseNote(int midiNote) noexcept;
+    void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept;
+    [[nodiscard]] bool isProtectedFromStealing(std::size_t voiceIndex) const noexcept;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;
 };

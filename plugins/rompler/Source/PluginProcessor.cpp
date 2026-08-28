@@ -1,4 +1,7 @@
 #include "PluginProcessor.h"
+
+#include <array>
+#include <cmath>
 #include "PluginEditor.h"
 
 #include <juce_core/juce_core.h>
@@ -17,18 +20,29 @@ RomplerProcessor::RomplerProcessor()
       apvts_ (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
     setLatencySamples (0);
+    startTimerHz (60);
+}
+
+RomplerProcessor::~RomplerProcessor()
+{
+    stopTimer();
+    // Drain all remaining retired loaders to prevent dangling SF2Loader
+    // instances. releaseResources() has already moved all active loaders
+    // to retiredLoaders_, so this completes the final cleanup.
+    drainRetiredLoaders();
 }
 
 void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
     sampleRate_ = sampleRate;
-    voicePool_ = std::make_unique<VoicePool>();
+    voicePool_ = std::make_unique<VoicePool> (VoicePool::maxVoices);
 
     // Surface the bundled SoundFont so the plugin starts usable without a
     // manual Load step when the packaged font is present.
     loadBundledSoundFont();
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
+    dynamicsProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     fxProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
 
     // The oversampling factor is fixed for this prepareToPlay session; see
@@ -54,6 +68,11 @@ void RomplerProcessor::releaseResources()
 
     bundledFontLoaded_ = false;
     voicePool_.reset();
+    dynamicsProcessor_.reset();
+    
+    // Drain all retired loaders now that the audio thread is stopped.
+    // This ensures no dangling SF2Loader instances remain.
+    drainRetiredLoaders();
 }
 
 bool RomplerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -66,141 +85,316 @@ bool RomplerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
         || output == juce::AudioChannelSet::stereo();
 }
 
+void RomplerProcessor::syncBlockParameters() noexcept
+{
+    const auto value = [this] (const char* id, float fallback)
+    {
+        if (const auto* parameter = apvts_.getRawParameterValue (id))
+            return parameter->load();
+        return fallback;
+    };
+
+    const int requestedOsIndex = static_cast<int> (value (ParamIDs::busOsFactor,
+                                                           static_cast<float> (cachedOsFactorIndex_)));
+    if (requestedOsIndex != cachedOsFactorIndex_)
+    {
+        cachedOsFactorIndex_ = requestedOsIndex;
+        pendingLatencySamples_.store (busProcessor_.getLatencySamples (cachedOsFactorIndex_),
+                                      std::memory_order_release);
+        queueAsyncFlag (mirrorLatency);
+    }
+
+    const int requestedLegato = static_cast<int> (value (ParamIDs::voiceLegato,
+                                                          static_cast<float> (cachedLegatoParamValue_)));
+    if (requestedLegato != cachedLegatoParamValue_)
+    {
+        cachedLegatoParamValue_ = requestedLegato;
+        const bool enabled = requestedLegato != 0;
+        legatoEnabled_.store (enabled, std::memory_order_relaxed);
+        if (voicePool_)
+            voicePool_->setLegatoEnabled (enabled);
+    }
+
+    blockParameters_.driveDb = value (ParamIDs::voiceDrive, 0.0f);
+    blockParameters_.curveId = static_cast<int> (value (ParamIDs::voiceCurve, 0.0f));
+    blockParameters_.velToDriveDb = value (ParamIDs::voiceVelToDrive, 0.0f);
+    blockParameters_.filterRouting = static_cast<int> (value (ParamIDs::voiceFilterRouting, 0.0f));
+    if (filterOffsetCcGeneration_.load (std::memory_order_acquire)
+        == filterOffsetMirroredGeneration_.load (std::memory_order_acquire))
+        realtimeFilterOffsetCents_.store (value (ParamIDs::voiceFilterOffset, 0.0f), std::memory_order_relaxed);
+    blockParameters_.filterOffsetCents = realtimeFilterOffsetCents_.load (std::memory_order_relaxed);
+    blockParameters_.polyphony = static_cast<int> (value (ParamIDs::polyLimit,
+                                                           static_cast<float> (VoicePool::maxVoices)));
+    blockParameters_.attackMs = value (ParamIDs::envAttack, 0.0f);
+    blockParameters_.decayMs = value (ParamIDs::envDecay, 0.0f);
+    // APVTS exposes sustain as a user-facing percentage; DSP ADSR expects a
+    // normalized 0..1 level.
+    blockParameters_.sustainLevel = value (ParamIDs::envSustain, 100.0f) / 100.0f;
+    blockParameters_.releaseMs = value (ParamIDs::envRelease, 0.0f);
+    blockParameters_.pitchBendSemitones = pitchBendSemitones_.load (std::memory_order_relaxed);
+    blockParameters_.vibratoDepthCents = modWheelValue_.load (std::memory_order_relaxed) * kMaxVibratoDepthCents;
+    blockParameters_.ccGain = masterVolumeCc7_ * expressionCc11_;
+    blockParameters_.pan = panCc10_;
+    blockParameters_.tapeDrivePercent = value (ParamIDs::busTapeDrive, 0.0f);
+    blockParameters_.foldPercent = value (ParamIDs::busFold, 0.0f);
+    if (busCutoffCcGeneration_.load (std::memory_order_acquire)
+        == busCutoffMirroredGeneration_.load (std::memory_order_acquire))
+        realtimeBusCutoffHz_.store (value (ParamIDs::busFilterCutoff, 20000.0f), std::memory_order_relaxed);
+    blockParameters_.filterCutoffHz = realtimeBusCutoffHz_.load (std::memory_order_relaxed);
+    blockParameters_.filterResonancePercent = value (ParamIDs::busFilterResonance, 0.0f);
+    blockParameters_.compThreshold = value (ParamIDs::compThreshold, -18.0f);
+    blockParameters_.compRatio = value (ParamIDs::compRatio, 3.0f);
+    blockParameters_.compAttack = value (ParamIDs::compAttack, 15.0f);
+    blockParameters_.compRelease = value (ParamIDs::compRelease, 180.0f);
+    blockParameters_.compMakeup = value (ParamIDs::compMakeup, 0.0f);
+    blockParameters_.compMix = value (ParamIDs::compMix, 0.0f);
+    blockParameters_.chorusRate = value (ParamIDs::fxChorusRate, 1.0f);
+    blockParameters_.chorusDepth = value (ParamIDs::fxChorusDepth, 30.0f) / 100.0f;
+    blockParameters_.chorusMix = value (ParamIDs::fxChorusMix, 25.0f) / 100.0f;
+    blockParameters_.reverbRoom = value (ParamIDs::fxReverbRoom, 40.0f) / 100.0f;
+    blockParameters_.reverbDamp = value (ParamIDs::fxReverbDamp, 50.0f) / 100.0f;
+    blockParameters_.reverbMix = value (ParamIDs::fxReverbMix, 20.0f) / 100.0f;
+    blockParameters_.delayMix = value (ParamIDs::fxDelayMix, 0.0f) / 100.0f;
+    blockParameters_.delayFeedback = value (ParamIDs::fxDelayFeedback, 35.0f) / 100.0f;
+    blockParameters_.outputGain = std::pow (10.0f, value (ParamIDs::outTrim, -3.0f) / 20.0f)
+                                * value (ParamIDs::outMix, 100.0f) / 100.0f;
+    blockParameters_.bpm = 120.0f;
+    if (auto* playHead = getPlayHead())
+        if (const auto position = playHead->getPosition())
+            if (const auto bpm = position->getBpm())
+                blockParameters_.bpm = static_cast<float> (*bpm);
+
+    if (voicePool_)
+        voicePool_->setPolyphony (blockParameters_.polyphony);
+}
+
+void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, SF2Loader& loader) noexcept
+{
+    if (event.noteOn)
+    {
+        const int bank = currentBank_.load (std::memory_order_relaxed);
+        const int program = currentProgram_.load (std::memory_order_relaxed);
+        if (Sample* sample = loader.getSample (bank, program, event.note, event.velocity))
+        {
+            voicePool_->start (sample, event.note, static_cast<float> (event.velocity) / 127.0f);
+            // Capture bank token for this voice
+            const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
+            const int voiceIndex = voicePool_->voiceIndexForNote (event.note);
+            if (Voice* voice = voicePool_->getVoiceAtIndex (voiceIndex))
+            {
+                BankToken token;
+                token.bankSlot = activeBankSlot;
+                token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
+                token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
+                voice->setBankToken (token);
+            }
+        }
+    }
+    else
+    {
+        voicePool_->stop (event.note);
+    }
+}
+
+void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, SF2Loader& loader) noexcept
+{
+    if (msg.isNoteOn())
+    {
+        const int bank = currentBank_.load (std::memory_order_relaxed);
+        const int program = currentProgram_.load (std::memory_order_relaxed);
+        if (Sample* sample = loader.getSample (bank, program, msg.getNoteNumber(), msg.getVelocity()))
+        {
+            voicePool_->start (sample, msg.getNoteNumber(), static_cast<float> (msg.getVelocity()) / 127.0f);
+            // Capture bank token for this voice
+            const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
+            const int voiceIndex = voicePool_->voiceIndexForNote (msg.getNoteNumber());
+            if (Voice* voice = voicePool_->getVoiceAtIndex (voiceIndex))
+            {
+                BankToken token;
+                token.bankSlot = activeBankSlot;
+                token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
+                token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
+                voice->setBankToken (token);
+            }
+        }
+    }
+    else if (msg.isNoteOff())
+    {
+        voicePool_->stop (msg.getNoteNumber());
+    }
+    else if (msg.isProgramChange())
+    {
+        const int program = msg.getProgramChangeNumber();
+        currentProgram_.store (program, std::memory_order_relaxed);
+        if (program >= 0 && program < 8)
+            requestQuickSlot (program + 1);
+    }
+    else if (msg.isPitchWheel())
+    {
+        const float normalized = (static_cast<float> (msg.getPitchWheelValue()) - 8192.0f) / 8192.0f;
+        blockParameters_.pitchBendSemitones = juce::jlimit (-1.0f, 1.0f, normalized) * kPitchBendRangeSemitones;
+        pitchBendSemitones_.store (blockParameters_.pitchBendSemitones, std::memory_order_relaxed);
+    }
+    else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+    {
+        voicePool_->stopAll();
+    }
+    else if (msg.isController())
+    {
+        const int ccNumber = msg.getControllerNumber();
+        const int ccValue = msg.getControllerValue();
+        const float normalizedCc = static_cast<float> (ccValue) / 127.0f;
+        switch (ccNumber)
+        {
+            case 1:
+                modWheelValue_.store (normalizedCc, std::memory_order_relaxed);
+                blockParameters_.vibratoDepthCents = normalizedCc * kMaxVibratoDepthCents;
+                break;
+            case 7:
+                masterVolumeCc7_ = normalizedCc;
+                blockParameters_.ccGain = masterVolumeCc7_ * expressionCc11_;
+                break;
+            case 10:
+                panCc10_ = normalizedCc;
+                blockParameters_.pan = panCc10_;
+                break;
+            case 11:
+                expressionCc11_ = normalizedCc;
+                blockParameters_.ccGain = masterVolumeCc7_ * expressionCc11_;
+                break;
+            case 64:
+            {
+                const bool held = ccValue >= 64;
+                sustainHeld_.store (held, std::memory_order_relaxed);
+                voicePool_->setSustainHeld (held);
+                break;
+            }
+            case 65:
+            {
+                const bool enabled = ccValue >= 64;
+                legatoEnabled_.store (enabled, std::memory_order_relaxed);
+                voicePool_->setLegatoEnabled (enabled);
+                cachedLegatoParamValue_ = enabled ? 1 : 0;
+                break;
+            }
+            case 71:
+                if (auto* param = apvts_.getParameter (ParamIDs::voiceFilterOffset))
+                {
+                    const auto filterOffset = param->convertFrom0to1 (normalizedCc);
+                    realtimeFilterOffsetCents_.store (filterOffset, std::memory_order_relaxed);
+                    blockParameters_.filterOffsetCents = filterOffset;
+                    filterOffsetCcGeneration_.fetch_add (1, std::memory_order_acq_rel);
+                    pendingFilterOffsetNormalized_.store (normalizedCc, std::memory_order_release);
+                    filterOffsetCcGeneration_.fetch_add (1, std::memory_order_release);
+                    queueAsyncFlag (mirrorFilterOffset);
+                }
+                break;
+            case 74:
+                if (auto* param = apvts_.getParameter (ParamIDs::busFilterCutoff))
+                {
+                    const auto busCutoff = param->convertFrom0to1 (normalizedCc);
+                    realtimeBusCutoffHz_.store (busCutoff, std::memory_order_relaxed);
+                    blockParameters_.filterCutoffHz = busCutoff;
+                    busCutoffCcGeneration_.fetch_add (1, std::memory_order_acq_rel);
+                    pendingBusCutoffNormalized_.store (normalizedCc, std::memory_order_release);
+                    busCutoffCcGeneration_.fetch_add (1, std::memory_order_release);
+                    queueAsyncFlag (mirrorBusCutoff);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void RomplerProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start, int count) noexcept
+{
+    if (count <= 0)
+        return;
+
+    std::array<float*, 2> channels {};
+    const int numChannels = buffer.getNumChannels();
+    for (int channel = 0; channel < numChannels; ++channel)
+        channels[static_cast<std::size_t> (channel)] = buffer.getWritePointer (channel) + start;
+    juce::AudioBuffer<float> range (channels.data(), numChannels, count);
+
+    float* outL = range.getWritePointer (0);
+    voicePool_->render (outL, count, static_cast<int> (sampleRate_), blockParameters_.driveDb,
+                        blockParameters_.velToDriveDb, blockParameters_.curveId,
+                        blockParameters_.filterRouting, blockParameters_.filterOffsetCents,
+                        blockParameters_.attackMs, blockParameters_.decayMs,
+                        blockParameters_.sustainLevel, blockParameters_.releaseMs,
+                        blockParameters_.pitchBendSemitones, blockParameters_.vibratoDepthCents);
+
+    if (blockParameters_.ccGain != 1.0f)
+        juce::FloatVectorOperations::multiply (outL, blockParameters_.ccGain, count);
+
+    if (numChannels > 1)
+    {
+        float* outR = range.getWritePointer (1);
+        juce::FloatVectorOperations::copy (outR, outL, count);
+        if (blockParameters_.pan != 0.5f)
+        {
+            const float pan = juce::jlimit (0.0f, 1.0f, blockParameters_.pan);
+            juce::FloatVectorOperations::multiply (outL, std::sin ((1.0f - pan) * juce::MathConstants<float>::halfPi), count);
+            juce::FloatVectorOperations::multiply (outR, std::sin (pan * juce::MathConstants<float>::halfPi), count);
+        }
+    }
+
+    busProcessor_.process (range, blockParameters_.tapeDrivePercent, blockParameters_.foldPercent,
+                           blockParameters_.filterCutoffHz, blockParameters_.filterResonancePercent,
+                           cachedOsFactorIndex_);
+    dynamicsProcessor_.process (range, blockParameters_.compThreshold, blockParameters_.compRatio,
+                                blockParameters_.compAttack, blockParameters_.compRelease,
+                                blockParameters_.compMakeup, blockParameters_.compMix);
+    fxProcessor_.process (range, blockParameters_.chorusRate, blockParameters_.chorusDepth,
+                          blockParameters_.chorusMix, blockParameters_.reverbRoom,
+                          blockParameters_.reverbDamp, blockParameters_.reverbMix,
+                          blockParameters_.delayMix, blockParameters_.delayFeedback,
+                          blockParameters_.bpm);
+    range.applyGain (blockParameters_.outputGain);
+}
+
 void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-
     buffer.clear();
-
-    // Sync the oversampling factor at the block boundary, before any early
-    // return: the reported latency must track the parameter even while no
-    // SoundFont is loaded, so the host never sees a stale PDC figure when a
-    // font appears mid-session. The BusProcessor keeps all four oversamplers
-    // prepared, so switching here never allocates; only the reported latency
-    // moves, and setLatencySamples() itself no-ops while the value is
-    // unchanged, so the host is notified exactly once per real factor change.
-    {
-        const auto osFactorParam = apvts_.getRawParameterValue (ParamIDs::busOsFactor);
-        const int requestedOsIndex = osFactorParam ? static_cast<int> (osFactorParam->load()) : cachedOsFactorIndex_;
-        if (requestedOsIndex != cachedOsFactorIndex_)
-        {
-            cachedOsFactorIndex_ = requestedOsIndex;
-            setLatencySamples (busProcessor_.getLatencySamples (cachedOsFactorIndex_));
-        }
-    }
+    syncBlockParameters();
 
     SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
-    if (!voicePool_ || loader == nullptr)
+    if (! voicePool_)
         return;
 
-    float* outL = buffer.getWritePointer(0);
-    const int numSamples = buffer.getNumSamples();
-
-    // Drain UI / computer-keyboard note events first (message thread).
-    std::queue<std::tuple<int, bool, int>> uiNotes;
+    const bool queueOverflowed = noteQueueOverflowed_.exchange (false, std::memory_order_acq_rel);
+    UiNoteEvent uiNote {};
+    for (std::size_t drained = 0; drained < maxQueuedNotes && noteQueue_.tryPop (uiNote); ++drained)
     {
-        const std::lock_guard lock (noteQueueMutex_);
-        uiNotes = std::move (noteQueue_);
-        noteQueue_ = {};
-    }
-    while (!uiNotes.empty())
-    {
-        const auto [note, on, velocity] = uiNotes.front();
-        uiNotes.pop();
-        if (on)
-        {
-            const int bank = currentBank_.load (std::memory_order_relaxed);
-            const int program = currentProgram_.load (std::memory_order_relaxed);
-            if (Sample* sample = loader->getSample (bank, program, note, velocity))
-                voicePool_->start (sample, note, static_cast<float>(velocity) / 127.0f);
-        }
-        else
-        {
-            voicePool_->stop (note);
-        }
+        if (loader != nullptr)
+            dispatchUiNote (uiNote, *loader);
+        else if (! uiNote.noteOn)
+            voicePool_->stop (uiNote.note);
     }
 
-    for (const auto event : midiMessages)
+    if (queueOverflowed)
     {
-        const auto msg = event.getMessage();
-
-        if (msg.isNoteOn())
-        {
-            const int note = msg.getNoteNumber();
-            const int velocity = msg.getVelocity();
-            const int bank = currentBank_.load (std::memory_order_relaxed);
-            const int program = currentProgram_.load (std::memory_order_relaxed);
-            Sample* sample = loader->getSample(bank, program, note, velocity);
-
-            if (sample != nullptr)
-                voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
-        }
-        else if (msg.isNoteOff())
-        {
-            const int note = msg.getNoteNumber();
-            voicePool_->stop(note);
-        }
-        else if (msg.isProgramChange())
-        {
-            currentProgram_.store (msg.getProgramChangeNumber(), std::memory_order_relaxed);
-        }
+        voicePool_->stopAll();
+        uiNoteQueueOverflowDiagnostic_.store (true, std::memory_order_release);
     }
 
-    const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
-    const auto curveParam = apvts_.getRawParameterValue(ParamIDs::voiceCurve);
-    const auto velToDriveParam = apvts_.getRawParameterValue(ParamIDs::voiceVelToDrive);
-    const auto filterRoutingParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterRouting);
-    const auto filterOffsetParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterOffset);
-    const auto polyLimitParam = apvts_.getRawParameterValue(ParamIDs::polyLimit);
-    const float driveDb = driveParam ? driveParam->load() : 0.0f;
-    const int curveId = curveParam ? static_cast<int>(curveParam->load()) : 0;
-    const float velToDriveDb = velToDriveParam ? velToDriveParam->load() : 0.0f;
-    const int filterRouting = filterRoutingParam ? static_cast<int>(filterRoutingParam->load()) : 0;
-    const float filterOffsetCents = filterOffsetParam ? filterOffsetParam->load() : 0.0f;
+    if (loader == nullptr)
+        return;
 
-    if (polyLimitParam)
-        voicePool_->setPolyphony (static_cast<int> (polyLimitParam->load()));
-
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, velToDriveDb,
-                        curveId, filterRouting, filterOffsetCents);
-
-    if (buffer.getNumChannels() > 1)
+    const int blockSamples = buffer.getNumSamples();
+    int cursor = 0;
+    for (const auto metadata : midiMessages)
     {
-        float* outR = buffer.getWritePointer(1);
-        juce::FloatVectorOperations::copy(outR, outL, numSamples);
+        const int position = juce::jlimit (0, blockSamples, metadata.samplePosition);
+        renderRange (buffer, cursor, position - cursor);
+        dispatchMidiMessage (metadata.getMessage(), *loader);
+        cursor = position;
     }
-
-    const auto tapeDriveParam = apvts_.getRawParameterValue(ParamIDs::busTapeDrive);
-    const auto foldParam = apvts_.getRawParameterValue(ParamIDs::busFold);
-    const float tapeDrivePercent = tapeDriveParam ? tapeDriveParam->load() : 0.0f;
-    const float foldPercent = foldParam ? foldParam->load() : 0.0f;
-
-    busProcessor_.process (buffer, tapeDrivePercent, foldPercent, cachedOsFactorIndex_);
-
-    const auto chorusRateP  = apvts_.getRawParameterValue (ParamIDs::fxChorusRate);
-    const auto chorusDepthP = apvts_.getRawParameterValue (ParamIDs::fxChorusDepth);
-    const auto chorusMixP   = apvts_.getRawParameterValue (ParamIDs::fxChorusMix);
-    const auto reverbRoomP  = apvts_.getRawParameterValue (ParamIDs::fxReverbRoom);
-    const auto reverbDampP  = apvts_.getRawParameterValue (ParamIDs::fxReverbDamp);
-    const auto reverbMixP   = apvts_.getRawParameterValue (ParamIDs::fxReverbMix);
-
-    fxProcessor_.process (buffer,
-                          chorusRateP  ? chorusRateP->load()  : 1.0f,
-                          chorusDepthP ? chorusDepthP->load() / 100.0f : 0.3f,
-                          chorusMixP   ? chorusMixP->load()   / 100.0f : 0.25f,
-                          reverbRoomP  ? reverbRoomP->load()  / 100.0f : 0.4f,
-                          reverbDampP  ? reverbDampP->load()  / 100.0f : 0.5f,
-                          reverbMixP   ? reverbMixP->load()   / 100.0f : 0.2f);
-
-    const auto outTrimParam = apvts_.getRawParameterValue(ParamIDs::outTrim);
-    const auto outMixParam = apvts_.getRawParameterValue(ParamIDs::outMix);
-    const float outTrimDb = outTrimParam ? outTrimParam->load() : 0.0f;
-    const float outTrimGain = std::pow(10.0f, outTrimDb / 20.0f);
-    const float outMixGain = outMixParam ? outMixParam->load() / 100.0f : 1.0f;
-
-    buffer.applyGain(outTrimGain * outMixGain);
-
-    lastPeak_.store (buffer.getMagnitude (0, numSamples), std::memory_order_relaxed);
+    renderRange (buffer, cursor, blockSamples - cursor);
+    lastPeak_.store (buffer.getMagnitude (0, blockSamples), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* RomplerProcessor::createEditor()
@@ -243,13 +437,20 @@ void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (auto* banksXml = xml->getChildByName ("Banks"))
     {
         const int activeSlot = banksXml->getIntAttribute ("activeSlot", 0);
-        for (auto* slotXml : banksXml->getChildIterator ("Slot"))
+        for (auto* slotXml : banksXml->getChildIterator())
         {
+            if (slotXml->getTagName() != "Slot")
+            continue;
             const int idx = slotXml->getIntAttribute ("index", -1);
             const auto fileName = slotXml->getStringAttribute ("file", {});
             if (idx >= 0 && idx < maxBanks && fileName.isNotEmpty())
             {
-                const juce::File file (fileName);
+                juce::File file (fileName);
+                // Older state blobs stored only a filename. Keep accepting
+                // those documents by checking the current directory first,
+                // then the packaged SoundFonts directory.
+                if (! file.existsAsFile())
+                    file = getBundledSoundFontsDirectory().getChildFile (fileName);
                 if (file.existsAsFile())
                     loadSoundFont (file, idx);
             }
@@ -272,9 +473,16 @@ void RomplerProcessor::loadSoundFont(const juce::File& file, int bankSlot)
     if (!newLoader->loadFile(file))
         return;
 
-    bankNames_[static_cast<std::size_t> (bankSlot)] = file.getFileName();
+    // Keep the absolute identity so a captured preset can be restored even
+    // when the working directory or host process changes.
+    bankNames_[static_cast<std::size_t> (bankSlot)] = file.getFullPathName();
 
     // If this is the active slot, update currentBank/currentProgram and publish.
+    // Increment generation and store file hash for bank token
+    const auto fileHash = std::hash<std::string>{}(file.getFullPathName().toStdString());
+    bankFileHash_[static_cast<std::size_t>(bankSlot)] = fileHash;
+    bankGeneration_[static_cast<std::size_t>(bankSlot)].fetch_add(1, std::memory_order_release);
+
     if (bankSlot == activeBankSlot_.load (std::memory_order_relaxed))
     {
         const auto [bank, program] = newLoader->firstPresetProgram();
@@ -351,31 +559,46 @@ bool RomplerProcessor::isBankLoaded(int bankSlot) const noexcept
 // loads the plugin is immediately playable without a manual Load step.
 namespace
 {
-    juce::File pathForBundledSoundFont()
-    {
+    /** The exact filename picked as the startup default; must stay in sync
+        with the bundling logic in plugins/rompler/CMakeLists.txt. */
+    constexpr const char* kDefaultBundledSoundFontName = "Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2";
+
 #if JUCE_MAC
-        // Locate this module's own path with dladdr and walk up from
-        // <bundle>/Contents/MacOS/<name> to <bundle>/Contents/Resources. This
-        // works in every host because it does not depend on which bundle the
-        // host considers "main".
+    /** <bundle>/Contents/Resources, located by walking up from this module's
+        own on-disk path via dladdr. Works regardless of which bundle the
+        host considers "main". Returns an invalid File outside a bundle. */
+    juce::File resourcesDirectory()
+    {
         Dl_info info;
-        if (dladdr (reinterpret_cast<void*> (&pathForBundledSoundFont), &info) == 0
+        if (dladdr (reinterpret_cast<void*> (&resourcesDirectory), &info) == 0
             || info.dli_fname == nullptr)
             return {};
 
-        juce::File resourcesDir = juce::File (juce::String (info.dli_fname))
-                                      .getParentDirectory()   // Contents/MacOS
-                                      .getParentDirectory()   // Contents
-                                      .getChildFile ("Resources");
-        for (auto& entry : juce::RangedDirectoryIterator (resourcesDir, false))
-            if (entry.getFile().hasFileExtension (".sf2"))
-                return entry.getFile();
+        return juce::File (juce::String (info.dli_fname))
+                   .getParentDirectory()   // Contents/MacOS
+                   .getParentDirectory()   // Contents
+                   .getChildFile ("Resources");
+    }
+#endif
 
-        return {};
+    /** Contents/Resources/SoundFonts, the folder the bundled SF2s are copied
+        into by CMakeLists.txt. Non-macOS packaging does not yet bundle SF2s. */
+    juce::File soundFontsDirectory()
+    {
+#if JUCE_MAC
+        return resourcesDirectory().getChildFile ("SoundFonts");
 #else
-        // Non-macOS packaging does not yet bundle an SF2.
         return {};
 #endif
+    }
+
+    /** The startup-default SF2, matched by exact filename (not "first .sf2
+        found") so the deterministic default survives alongside the other
+        bundled fonts in the same folder. */
+    juce::File pathForBundledSoundFont()
+    {
+        const juce::File file = soundFontsDirectory().getChildFile (kDefaultBundledSoundFontName);
+        return file.existsAsFile() ? file : juce::File {};
     }
 } // namespace
 
@@ -390,6 +613,11 @@ void RomplerProcessor::loadBundledSoundFont()
         loadSoundFont (file, 0);
         bundledFontLoaded_ = isBankLoaded (0);
     }
+}
+
+juce::File RomplerProcessor::getBundledSoundFontsDirectory() const noexcept
+{
+    return soundFontsDirectory();
 }
 
 int RomplerProcessor::getPresetCount() const noexcept
@@ -417,19 +645,269 @@ void RomplerProcessor::selectPreset (int bank, int program) noexcept
 {
     currentBank_.store (bank, std::memory_order_relaxed);
     currentProgram_.store (program, std::memory_order_relaxed);
+
+    for (const auto* id : ParamSets::rotary)
+        if (auto* parameter = apvts_.getParameter (id))
+            parameter->setValueNotifyingHost (parameter->getDefaultValue());
+}
+
+namespace
+{
+void captureParameter (const juce::AudioProcessorValueTreeState& state,
+                       const char* id, bool isChoice, juce::String choiceText,
+                       std::vector<PresetParameterValue>& destination)
+{
+    if (const auto* parameter = state.getParameter (id))
+    {
+        PresetParameterValue value;
+        value.id = id;
+        value.isChoice = isChoice;
+        value.value = parameter->getValue();
+        value.text = std::move (choiceText);
+        destination.push_back (std::move (value));
+    }
+}
+
+juce::String currentChoiceText (const juce::AudioProcessorValueTreeState& state,
+                                const char* id, const juce::StringArray& choices)
+{
+    if (const auto* parameter = state.getParameter (id))
+    {
+        const auto normalised = juce::jlimit (0.0f, 1.0f, parameter->getValue());
+        const auto index = juce::jlimit (0, choices.size() - 1,
+                                         juce::roundToInt (normalised * static_cast<float> (choices.size() - 1)));
+        return choices[index];
+    }
+    return {};
+}
+
+void applyChoice (juce::AudioProcessorValueTreeState& state,
+                  const PresetParameterValue& stored,
+                  const juce::StringArray& choices)
+{
+    if (auto* parameter = state.getParameter (stored.id))
+    {
+        const int index = choices.indexOf (stored.text);
+        if (index >= 0 && choices.size() > 1)
+            parameter->setValueNotifyingHost (static_cast<float> (index) / static_cast<float> (choices.size() - 1));
+    }
+}
+} // namespace
+
+PresetDocument RomplerProcessor::capturePreset() const
+{
+    PresetDocument document;
+    document.name = "Untitled";
+    document.source = PresetSource::user;
+    document.createdAtMs = juce::Time::getCurrentTime().toMilliseconds();
+    document.modifiedAtMs = document.createdAtMs;
+
+    const int slot = activeBankSlot_.load (std::memory_order_relaxed);
+    document.soundFontPath = bankNames_[static_cast<std::size_t> (slot)];
+    document.soundFontName = juce::File (document.soundFontPath).getFileName();
+    document.bank = currentBank_.load (std::memory_order_relaxed);
+    document.program = currentProgram_.load (std::memory_order_relaxed);
+
+    for (const auto* id : ParamSets::rotary)
+        captureParameter (apvts_, id, false, {}, document.parameters);
+
+    captureParameter (apvts_, ParamIDs::voiceCurve, true,
+                      currentChoiceText (apvts_, ParamIDs::voiceCurve, Choices::curve), document.parameters);
+    captureParameter (apvts_, ParamIDs::voiceFilterRouting, true,
+                      currentChoiceText (apvts_, ParamIDs::voiceFilterRouting, Choices::filterRouting), document.parameters);
+    captureParameter (apvts_, ParamIDs::voiceLegato, true,
+                      currentChoiceText (apvts_, ParamIDs::voiceLegato, Choices::legato), document.parameters);
+    return document;
+}
+
+RomplerProcessor::ApplyStatus RomplerProcessor::applyPreset (const PresetDocument& document, const juce::File& resolvedSoundFont)
+{
+    if (! resolvedSoundFont.existsAsFile())
+        return ApplyStatus::soundFontMissing;
+
+    // PresetDocument::bank is the SoundFont MIDI bank, not our internal
+    // multi-bank slot. Replace the currently selected slot, then restore the
+    // document's bank/program pair after the loader has published.
+    const int bankSlot = juce::jlimit (0, maxBanks - 1,
+                                       activeBankSlot_.load (std::memory_order_relaxed));
+    loadSoundFont (resolvedSoundFont, bankSlot);
+    if (! isBankLoaded (bankSlot))
+        return ApplyStatus::soundFontLoadFailed;
+
+    switchBank (bankSlot);
+    selectPreset (document.bank, document.program);
+
+    for (const auto& stored : document.parameters)
+    {
+        if (stored.isChoice)
+        {
+            if (stored.id == ParamIDs::voiceCurve)
+                applyChoice (apvts_, stored, Choices::curve);
+            else if (stored.id == ParamIDs::voiceFilterRouting)
+                applyChoice (apvts_, stored, Choices::filterRouting);
+            else if (stored.id == ParamIDs::voiceLegato)
+                applyChoice (apvts_, stored, Choices::legato);
+        }
+        else if (auto* parameter = apvts_.getParameter (stored.id))
+        {
+            parameter->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, stored.value));
+        }
+    }
+    return ApplyStatus::ok;
+}
+
+RomplerProcessor::ApplyStatus RomplerProcessor::applyPreset (const PresetDocument& document)
+{
+    return applyPreset (document, juce::File (document.soundFontPath));
+}
+
+void RomplerProcessor::requestQuickSlot (int slot) noexcept
+{
+    if (slot < 1 || slot > 8)
+        return;
+    pendingQuickSlot_.store (slot, std::memory_order_release);
+    queueAsyncFlag (quickSlot);
+}
+
+void RomplerProcessor::queueAsyncFlag (unsigned int flag) noexcept
+{
+    pendingAsyncFlags_.fetch_or (flag, std::memory_order_release);
+}
+
+void RomplerProcessor::mirrorNormalizedParameter (const char* parameterId, float normalizedValue)
+{
+    if (auto* parameter = apvts_.getParameter (parameterId))
+        parameter->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, normalizedValue));
+}
+
+void RomplerProcessor::drainRetiredLoaders() noexcept
+{
+    // Message thread only. Destroy all retired loaders at once.
+    // In the current conservative design, we assume all voices using
+    // a retired loader have long since finished rendering by the time
+    // we drain (i.e., multiple blocks after the retire event).
+    // A future optimization could track which voices still reference
+    // which generation of each slot, and drain only truly-orphaned loaders.
+    retiredLoaders_.clear();
+}
+
+void RomplerProcessor::timerCallback()
+{
+    // Drain and destroy retired SoundFont instances from prior
+    // loadSoundFont() or removeBank() calls. Multiple blocks may have
+    // passed since those calls, so all voices using those loaders have
+    // long since retired.
+    drainRetiredLoaders();
+
+    const auto flags = pendingAsyncFlags_.exchange (0, std::memory_order_acq_rel);
+    if ((flags & mirrorFilterOffset) != 0)
+    {
+        for (int attempt = 0; attempt < maxControllerMirrorAttempts; ++attempt)
+        {
+            const auto generation = filterOffsetCcGeneration_.load (std::memory_order_acquire);
+            if ((generation & 1u) != 0)
+                continue;
+
+            const auto capturedValue = pendingFilterOffsetNormalized_.load (std::memory_order_acquire);
+            if (beforeControllerMirrorForTesting_)
+                beforeControllerMirrorForTesting_();
+            if (filterOffsetCcGeneration_.load (std::memory_order_acquire) != generation)
+                continue;
+
+            // CC is authoritative from audio-thread capture until this
+            // deferred notification. A public APVTS CAS against host
+            // automation does not exist, so this policy is intentional.
+            mirrorNormalizedParameter (ParamIDs::voiceFilterOffset, capturedValue);
+
+            if (filterOffsetCcGeneration_.load (std::memory_order_acquire) == generation)
+            {
+                filterOffsetMirroredGeneration_.store (generation, std::memory_order_release);
+                pendingAsyncFlags_.fetch_and (~mirrorFilterOffset, std::memory_order_acq_rel);
+                if (filterOffsetCcGeneration_.load (std::memory_order_acquire) != generation)
+                    queueAsyncFlag (mirrorFilterOffset);
+                break;
+            }
+        }
+        if (filterOffsetCcGeneration_.load (std::memory_order_acquire)
+            != filterOffsetMirroredGeneration_.load (std::memory_order_acquire))
+            queueAsyncFlag (mirrorFilterOffset);
+    }
+    if ((flags & mirrorBusCutoff) != 0)
+    {
+        for (int attempt = 0; attempt < maxControllerMirrorAttempts; ++attempt)
+        {
+            const auto generation = busCutoffCcGeneration_.load (std::memory_order_acquire);
+            if ((generation & 1u) != 0)
+                continue;
+
+            const auto capturedValue = pendingBusCutoffNormalized_.load (std::memory_order_acquire);
+            if (beforeControllerMirrorForTesting_)
+                beforeControllerMirrorForTesting_();
+            if (busCutoffCcGeneration_.load (std::memory_order_acquire) != generation)
+                continue;
+
+            // See the matching CC71 policy above: capture is authoritative
+            // until the message-thread host mirror is delivered.
+            mirrorNormalizedParameter (ParamIDs::busFilterCutoff, capturedValue);
+
+            if (busCutoffCcGeneration_.load (std::memory_order_acquire) == generation)
+            {
+                busCutoffMirroredGeneration_.store (generation, std::memory_order_release);
+                pendingAsyncFlags_.fetch_and (~mirrorBusCutoff, std::memory_order_acq_rel);
+                if (busCutoffCcGeneration_.load (std::memory_order_acquire) != generation)
+                    queueAsyncFlag (mirrorBusCutoff);
+                break;
+            }
+        }
+        if (busCutoffCcGeneration_.load (std::memory_order_acquire)
+            != busCutoffMirroredGeneration_.load (std::memory_order_acquire))
+            queueAsyncFlag (mirrorBusCutoff);
+    }
+    if ((flags & mirrorLatency) != 0)
+    {
+        const auto latencySamples = pendingLatencySamples_.exchange (-1, std::memory_order_acq_rel);
+        if (latencySamples >= 0)
+            setLatencySamples (latencySamples);
+    }
+    if ((flags & quickSlot) != 0)
+    {
+        const auto slot = pendingQuickSlot_.exchange (0, std::memory_order_acq_rel);
+        if (slot != 0 && onQuickSlotRequested)
+            onQuickSlotRequested (slot);
+    }
 }
 
 void RomplerProcessor::postNote (int note, bool on, int velocity)
 {
-    const std::lock_guard lock (noteQueueMutex_);
+    // When the queue is full the new event is dropped and processBlock() forces
+    // an all-notes-off recovery at the next block boundary. This prevents a
+    // lost note-off from leaving a voice stuck indefinitely.
+    const UiNoteEvent event { juce::jlimit (0, 127, note),
+                              juce::jlimit (0, 127, velocity),
+                              on };
+    if (! noteQueue_.tryPush (event))
+        noteQueueOverflowed_.store (true, std::memory_order_relaxed);
+}
 
-    // When the queue is full we drop the *new* event rather than the oldest.
-    // Dropping the oldest strands a note-on without its matching note-off (or
-    // vice versa): a lost note-on leaves the note silent, but a lost note-off
-    // leaves it ringing forever. Both are dropped symmetrically here, so the
-    // worst case is a momentarily missed keypress, never a stuck note.
-    if (noteQueue_.size() < maxQueuedNotes)
-        noteQueue_.push ({ note, on, velocity });
+bool RomplerProcessor::consumeUiNoteQueueOverflow() noexcept
+{
+    return uiNoteQueueOverflowDiagnostic_.exchange (false, std::memory_order_acq_rel);
+}
+
+void RomplerProcessor::postPitchWheel (float normalizedValue) noexcept
+{
+    // Message-thread UI drag; writes the same atomic that host MIDI pitch
+    // wheel messages write in processBlock(), so both sources share one
+    // source of truth and never fight each other (last write wins, which is
+    // the same behavior a real hardware controller would have if two
+    // control surfaces both touched the same wheel).
+    pitchBendSemitones_.store (juce::jlimit (-1.0f, 1.0f, normalizedValue) * kPitchBendRangeSemitones,
+                               std::memory_order_relaxed);
+}
+
+void RomplerProcessor::postModWheel (float normalizedValue) noexcept
+{
+    modWheelValue_.store (juce::jlimit (0.0f, 1.0f, normalizedValue), std::memory_order_relaxed);
 }
 
 } // namespace aod
