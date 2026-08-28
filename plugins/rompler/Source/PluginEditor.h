@@ -9,40 +9,123 @@
 
 #include "PluginProcessor.h"
 #include "Parameters.h"
+#include "PresetBrowserOverlay.h"
 
 namespace aod
 {
 
-// Shared synth-deck palette, sampled from the design mockup.
+// === EON analogue hardware theme: warm anodised chassis, ivory legends and
+// restrained seafoam status illumination.  The colour hierarchy deliberately
+// keeps the panel material neutral, so the signal colours read as hardware
+// indicators instead of outlining every software-shaped widget. ===
 namespace theme
 {
-    inline juce::Colour body         { 0xff232622 };
-    inline juce::Colour body2        { 0xff171916 };
-    inline juce::Colour bodyEdge     { 0xff34382f };
-    inline juce::Colour panel        { 0xffded7bd };
-    inline juce::Colour panelEdge    { 0xffb6ae8f };
-    inline juce::Colour ink          { 0xff221f1a };
-    inline juce::Colour inkSoft      { 0xff56503f };
-    inline juce::Colour mint         { 0xff7fe0c4 };
-    inline juce::Colour mintDeep     { 0xff34a984 };
-    inline juce::Colour mintGlow     { 0xff7fe0c4 };
-    inline juce::Colour hot          { 0xffff9452 };
-    inline juce::Colour hotDeep      { 0xffc96324 };
-    inline juce::Colour knobCream    { 0xfff2ecd8 };
-    inline juce::Colour knobShadow   { 0xffb7ae8e };
-    inline juce::Colour ledRed       { 0xffff4d3d };
-    inline juce::Colour ledHot       { 0xffffb454 };
-    inline juce::Colour ledMint      { 0xff7fe0c4 };
-    inline juce::Colour ledOff       { 0xff2a2e28 };
-    inline juce::Colour displayBg    { 0xff0e1613 };
+    // Primary chassis and panel surfaces
+    inline juce::Colour body         { 0xff1b2422 };
+    inline juce::Colour body2        { 0xff37423e };
+    inline juce::Colour bodyEdge     { 0xff8e9a8e };
+
+    // Control panels - warm graphite / anodised aluminium
+    inline juce::Colour panel        { 0xff3a4742 };
+    inline juce::Colour panelEdge    { 0xff748178 };
+
+    // Text - slightly warm paint rather than a blue-white UI font
+    inline juce::Colour ink          { 0xfffbf8e9 };
+    inline juce::Colour inkSoft      { 0xffd0d8ca };
+
+    // Seafoam accents - reserved for interaction and signal flow
+    inline juce::Colour mint         { 0xff69d6b4 };
+    inline juce::Colour mintDeep     { 0xff2f977e };
+    inline juce::Colour mintGlow     { 0xffbcf1d6 };
+
+    // Hot / drive controls - amber for emphasis
+    inline juce::Colour hot          { 0xfff2b25c };
+    inline juce::Colour hotDeep      { 0xffbd6835 };
+
+    // Knob materials. The bright cream remains useful for legends and keys;
+    // the rotary caps themselves use a low-sheen graphite stack below.
+    inline juce::Colour knobCream    { 0xfff7f4e3 };
+    inline juce::Colour knobShadow   { 0xffabb2a6 };
+    inline juce::Colour knobWell     { 0xff070b0b };
+    inline juce::Colour knobSide     { 0xff1b2622 };
+    inline juce::Colour knobCap      { 0xff26312d };
+    inline juce::Colour knobCapHi    { 0xff718279 };
+    inline juce::Colour knobRim      { 0xffa0afa4 };
+    inline juce::Colour knobPointer  { 0xfffffdf1 };
+
+    // LED palette - signal-meter colors
+    inline juce::Colour ledRed       { 0xfff16d58 };
+    inline juce::Colour ledHot       { 0xffffc06a };
+    inline juce::Colour ledMint      { 0xff72dfbc };
+    inline juce::Colour ledOff       { 0xff121918 };
+
+    // Display area - near-black LCD window
+    inline juce::Colour displayBg    { 0xff071716 };
+    inline juce::Colour displayFg    { 0xff1d4038 };
+    inline juce::Colour displayOn    { 0xff9be9ce };
 }
 
-// Build a font at a given point height, optionally bold.
+// Build the panel typography from installed workstation-style faces rather
+// than JUCE's generic fallback.  Avenir Next keeps the small legends open and
+// human, while the extra tracking gives the labels the engraved-panel spacing
+// seen on hardware synths.  If a host does not provide the face JUCE falls
+// back to its normal sans-serif metrics automatically.
 inline juce::Font makeFont (float pt, bool bold)
 {
-    return bold ? juce::Font (juce::FontOptions (pt, juce::Font::bold))
-                : juce::Font (juce::FontOptions (pt));
+    const auto style = bold ? juce::Font::bold : juce::Font::plain;
+    return juce::Font (juce::FontOptions ("Avenir Next", pt, style)
+                           .withKerningFactor (bold ? 0.012f : 0.018f));
 }
+
+// Numeric readouts use DIN Alternate, whose squared forms and open counters
+// read like a real synth LCD without resorting to a synthetic seven-segment
+// bitmap.  Keep this separate so descriptive labels remain warmer.
+inline juce::Font makeDisplayFont (float pt, bool bold = true)
+{
+    const auto style = bold ? juce::Font::bold : juce::Font::plain;
+    return juce::Font (juce::FontOptions ("DIN Alternate", pt, style)
+                           .withKerningFactor (0.02f));
+}
+
+// Labels are rendered with a restrained two-pass extrusion.  The one-pixel
+// lower pass gives small legends a physical, screen-printed edge while the
+// foreground remains crisp at plugin scale.  This is intentionally subtle so
+// it reads as depth rather than a drop-shadow effect.
+class DepthLabel : public juce::Label
+{
+public:
+    using juce::Label::Label;
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto area = getLocalBounds().reduced (1);
+        const auto text = getText();
+        if (text.isEmpty())
+            return;
+
+        g.setFont (getFont());
+        const auto justification = getJustificationType();
+        const auto colour = findColour (juce::Label::textColourId);
+        g.setColour (juce::Colour (0x52000000));
+        g.drawFittedText (text, area.translated (0, 1), justification, 4,
+                          getMinimumHorizontalScale());
+        g.setColour (colour);
+        g.drawFittedText (text, area, justification, 4,
+                          getMinimumHorizontalScale());
+    }
+};
+
+/** A local, paint-only hardware key used for loading a SoundFont.  Keeping it
+    isolated avoids changing JUCE's global button look in a host window. */
+class HardwareButton final : public juce::TextButton
+{
+public:
+    explicit HardwareButton (const juce::String& text) : juce::TextButton (text) {}
+    void paintButton (juce::Graphics&, bool isMouseOverButton, bool isButtonDown) override;
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HardwareButton)
+};
 
 /**
     A mint-outlined cream panel with a tab label in its top edge, like the
@@ -57,20 +140,23 @@ public:
     void paint (juce::Graphics&) override;
 
 private:
-    juce::Label title_;
+    DepthLabel title_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SectionBox)
 };
 
 /**
-    Rotary control drawn as a cream knob with a mint pointer, styled for the
-    synth-deck panel. Drives a single RangedAudioParameter through a
-    SliderParameterAttachment. Vertical drag and the mouse wheel change the
-    value; the name and live value print below.
+    Rotary control with an original dark workstation-hardware treatment: a
+    recessed well, sidewall, knurled perimeter, bright indicator strip and a
+    264-degree scale centred at 12 o'clock. Drives a single
+    RangedAudioParameter through a SliderParameterAttachment. Vertical drag
+    and the mouse wheel change the value; its name and live value appear only
+    while it is being adjusted.
 */
 class Knob final : public juce::Component,
                    private juce::AudioProcessorParameter::Listener,
-                   private juce::AsyncUpdater
+                   private juce::AsyncUpdater,
+                   private juce::Timer
 {
 public:
     explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
@@ -78,6 +164,12 @@ public:
 
     /** Optionally override the printed name with an explicit UI label. */
     void setNameOverride (const juce::String& label) { name_.setText (label, juce::dontSendNotification); }
+
+    /** Pull the current parameter value into the custom-drawn slider immediately. */
+    void syncFromParameter();
+
+    /** True while the parameter sits at its APVTS default value. */
+    [[nodiscard]] bool isAtInitState() const noexcept { return atInit_; }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -95,14 +187,20 @@ public:
 
 private:
     void handleAsyncUpdate() override;
+    void timerCallback() override;
+    void setReadoutVisible (bool shouldBeVisible);
+    void refreshInitState();
 
     [[maybe_unused]] juce::RangedAudioParameter& param_;
     juce::Slider slider_;
-    juce::Label name_;
-    juce::Label value_;
+    DepthLabel name_;
+    DepthLabel value_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
     float lastDragY_ = 0.0f;
     bool hot_ = false;
+    bool readoutVisible_ = false;
+    bool pressed_ = false;
+    bool atInit_ = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Knob)
 };
@@ -131,7 +229,7 @@ private:
     void advanceChoice();
 
     [[maybe_unused]] juce::AudioParameterChoice& param_;
-    juce::Label label_;
+    DepthLabel label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
     juce::Rectangle<int> pill_;
@@ -159,11 +257,78 @@ public:
 
 private:
     [[maybe_unused]] juce::AudioParameterChoice& param_;
-    juce::Label label_;
+    DepthLabel label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Toggle)
+};
+
+/**
+    A vertical, spring-loaded pitch-bend wheel like the one beside a synth's
+    keybed. Dragging bends pitch across [-1, 1]; releasing snaps it back to
+    centre, matching physical pitch wheels. setValue() lets the editor
+    reflect live MIDI pitch-bend or host automation while the wheel is not
+    being dragged, so the widget tracks real playing input, not just the UI.
+*/
+class PitchWheel final : public juce::Component
+{
+public:
+    explicit PitchWheel (std::function<void (float)> onChange);
+    ~PitchWheel() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+    /** Reflects an externally-driven value (live MIDI or host automation)
+        while the wheel is not being dragged. Value in [-1, 1]. */
+    void setValue (float normalizedValue);
+
+private:
+    std::function<void (float)> onChange_;
+    DepthLabel label_;
+    float value_ = 0.0f;
+    bool dragging_ = false;
+    float dragStartY_ = 0.0f;
+    float dragStartValue_ = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchWheel)
+};
+
+/**
+    A vertical modulation wheel. Dragging changes the value across [0, 1] and,
+    unlike the pitch wheel, holds its position on release. setValue() lets the
+    editor reflect live MIDI CC1 or host automation while it is not being
+    dragged, so the wheel visually tracks actual vibrato depth in real time.
+*/
+class ModWheel final : public juce::Component
+{
+public:
+    explicit ModWheel (std::function<void (float)> onChange);
+    ~ModWheel() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+    /** Reflects an externally-driven value (live MIDI or host automation)
+        while the wheel is not being dragged. Value in [0, 1]. */
+    void setValue (float normalizedValue);
+
+private:
+    std::function<void (float)> onChange_;
+    DepthLabel label_;
+    float value_ = 0.0f;
+    bool dragging_ = false;
+    float dragStartY_ = 0.0f;
+    float dragStartValue_ = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModWheel)
 };
 
 /**
@@ -198,7 +363,7 @@ private:
     void handleAsyncUpdate() override;
 
     [[maybe_unused]] juce::RangedAudioParameter& param_;
-    juce::Label label_;
+    DepthLabel label_;
     juce::Slider slider_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
     float lastDragY_ = 0.0f;
@@ -221,6 +386,23 @@ private:
     float level_ = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PeakMeter)
+};
+
+/** Read-only horizontal LED meter for compressor gain reduction in dB. */
+class GainReductionMeter final : public juce::Component
+{
+public:
+    GainReductionMeter();
+    ~GainReductionMeter() override;
+
+    void setReductionDb (float reductionDb);
+    void paint (juce::Graphics&) override;
+
+private:
+    static constexpr int numSegments = 6;
+    float reductionDb_ = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GainReductionMeter)
 };
 
 struct PianoKey
@@ -282,6 +464,7 @@ public:
     void setCurrent (int bank, int program);
     void setOnSelect (std::function<void (int, int)> cb) { onSelect_ = std::move (cb); }
 
+    void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
@@ -296,7 +479,7 @@ private:
 
     juce::ComboBox bankCombo_;
     juce::ListBox list_ { "preset list", this };
-    juce::Label emptyHint_;
+    DepthLabel emptyHint_;
     std::vector<PresetEntry> presets_;
     std::vector<int> banks_;
     std::vector<int> filtered_;          // indices into presets_ for the active bank
@@ -304,6 +487,38 @@ private:
     std::function<void (int, int)> onSelect_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BankBrowser)
+};
+
+/** Interactive ADSR envelope preview. Drag a stage point to edit its bound
+    parameter; the existing knobs and host automation stay in sync. */
+class EnvelopeGraph final : public juce::Component,
+                           private juce::AudioProcessorParameter::Listener,
+                           private juce::AsyncUpdater
+{
+public:
+    EnvelopeGraph (juce::RangedAudioParameter& attack,
+                   juce::RangedAudioParameter& decay,
+                   juce::RangedAudioParameter& sustain,
+                   juce::RangedAudioParameter& release);
+    ~EnvelopeGraph() override;
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+private:
+    void parameterValueChanged (int, float) override;
+    void parameterGestureChanged (int, bool) override {}
+    void handleAsyncUpdate() override { repaint(); }
+    juce::Point<float> pointFor (int stage, juce::Rectangle<float> area) const;
+
+    std::array<juce::RangedAudioParameter*, 4> params_;
+    std::array<juce::Slider, 4> sliders_;
+    std::array<std::unique_ptr<juce::SliderParameterAttachment>, 4> attachments_;
+    int activeStage_ = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EnvelopeGraph)
 };
 
 class RomplerEditor final : public juce::AudioProcessorEditor,
@@ -314,40 +529,75 @@ public:
     explicit RomplerEditor (RomplerProcessor& processorRef);
     ~RomplerEditor() override;
 
+    /** Updates the document identity shown in the always-visible header. */
+    void setPresetHeaderDocument (const PresetDocument& document);
+    /** Marks the current document clean after a successful save. */
+    void markPresetHeaderSaved();
+    [[nodiscard]] bool isPresetHeaderDirty() const noexcept { return presetDirty_; }
+
+    /** Opens the non-modal preset library without taking host keyboard focus. */
+    void openPresetBrowser();
+    void closePresetBrowser();
+
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     RomplerProcessor& processor_;
+    PresetLibrary presetLibrary_;
 
-    juce::Label brandTitle_;
-    juce::Label brandSub_;
-    juce::Label badges_;
+    DepthLabel brandTitle_;
+    DepthLabel brandSub_;
+    DepthLabel presetName_;
+    DepthLabel presetDirtyIndicator_;
 
     SectionBox voiceBox_;
     SectionBox busBox_;
+    SectionBox compBox_;
     SectionBox envBox_;
     SectionBox fxBox_;
+    std::unique_ptr<EnvelopeGraph> envGraph_;
 
-    // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10), FX (11-16), ENV (17-20).
-    std::array<std::unique_ptr<juce::Component>, 21> controls_;
+    // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10, 29-30), FX
+    // (11-16, 27-28), ENV (17-20), COMP (21-26), VOICE legato toggle (31).
+    std::array<std::unique_ptr<juce::Component>, 32> controls_;
 
-    juce::Label sfLabel_;
-    juce::Label sfDisplay_;
-    juce::Label bankDigits_;
-    juce::TextButton loadButton_ { "LOAD" };
+    // Performance controls beside the keyboard: pitch bend (springs to
+    // centre) and mod wheel (holds position, drives vibrato depth). Both
+    // post through the processor so dragging behaves identically to live
+    // MIDI, and both repaint from a 20 Hz timer poll of the processor's
+    // current value so real MIDI/host input is reflected too.
+    std::unique_ptr<PitchWheel> pitchWheel_;
+    std::unique_ptr<ModWheel> modWheel_;
+
+    DepthLabel compPathLabel_;
+    GainReductionMeter gainReductionMeter_;
+
+    DepthLabel sfLabel_;
+    DepthLabel sfDisplay_;
+    DepthLabel bankDigits_;
+    HardwareButton loadButton_ { "LOAD" };
     PeakMeter peakMeter_;
 
     std::unique_ptr<BankBrowser> bankBrowser_;
+    std::unique_ptr<PresetBrowserOverlay> presetOverlay_;
+    HardwareButton presetButton_ { "PRESETS" };
     Keyboard keyboard_;
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
+    PresetDocument activePreset_;
+    bool hasActivePreset_ = false;
+    bool presetDirty_ = false;
 
     void refreshDisplay();
+    void refreshPresetHeader();
     void refreshPresetList();
+    void loadPresetUuid (const juce::String& uuid);
+    void handlePresetDirtyChoice (const juce::String& uuid, PresetBrowserOverlay::DirtyChoice choice);
     void onLoadButtonClicked();
     void layoutVoiceControls (juce::Rectangle<int> area);
     void layoutBusControls (juce::Rectangle<int> area);
+    void layoutCompControls (juce::Rectangle<int> area);
     void layoutEnvControls (juce::Rectangle<int> area);
     void layoutFxControls (juce::Rectangle<int> area);
 

@@ -1,15 +1,65 @@
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cmath>
 
 #include "PluginProcessor.h"
+#include "SF2Loader.h"
 
 namespace
 {
 constexpr double kSampleRate = 48000.0;
 constexpr int    kBlockSize  = 512;
+
+juce::File testSf2File()
+{
+    return juce::File (X10_SF2_CROSSCHECK_TESTDATA "/Dr._Mario_64_Soundfont.sf2");
+}
 } // namespace
+
+TEST_CASE ("selecting a preset resets knobs but keeps oversampling", "[plugin][smoke]")
+{
+    aod::RomplerProcessor processor;
+    auto& state = processor.getValueTreeState();
+    const std::array<const char*, 27> knobIds {
+        aod::ParamIDs::voiceDrive, aod::ParamIDs::voiceVelToDrive,
+        aod::ParamIDs::voiceFilterOffset, aod::ParamIDs::busTapeDrive,
+        aod::ParamIDs::busFold, aod::ParamIDs::busFilterCutoff,
+        aod::ParamIDs::busFilterResonance, aod::ParamIDs::outTrim,
+        aod::ParamIDs::outMix, aod::ParamIDs::fxChorusRate,
+        aod::ParamIDs::fxChorusDepth, aod::ParamIDs::fxChorusMix,
+        aod::ParamIDs::fxReverbRoom, aod::ParamIDs::fxReverbDamp,
+        aod::ParamIDs::fxReverbMix, aod::ParamIDs::fxDelayMix,
+        aod::ParamIDs::fxDelayFeedback, aod::ParamIDs::envAttack,
+        aod::ParamIDs::envDecay, aod::ParamIDs::envSustain,
+        aod::ParamIDs::envRelease, aod::ParamIDs::compThreshold,
+        aod::ParamIDs::compRatio, aod::ParamIDs::compAttack,
+        aod::ParamIDs::compRelease, aod::ParamIDs::compMakeup,
+        aod::ParamIDs::compMix
+    };
+    for (const auto* id : knobIds)
+    {
+        auto* parameter = state.getParameter (id);
+        REQUIRE (parameter != nullptr);
+        parameter->setValueNotifyingHost (0.13f);
+    }
+    auto* oversampling = state.getParameter (aod::ParamIDs::busOsFactor);
+    REQUIRE (oversampling != nullptr);
+    oversampling->setValueNotifyingHost (0.0f);
+
+    processor.selectPreset (12, 34);
+
+    for (const auto* id : knobIds)
+    {
+        const auto* parameter = state.getParameter (id);
+        REQUIRE (std::abs (parameter->getValue() - parameter->getDefaultValue()) < 1.0e-5f);
+    }
+    REQUIRE (std::abs (oversampling->getValue()) < 1.0e-5f);
+    const auto [bank, program] = processor.getCurrentBankProgram();
+    REQUIRE (bank == 12);
+    REQUIRE (program == 34);
+}
 
 /**
     JUCE is initialised and shut down here rather than through a function-local
@@ -64,6 +114,52 @@ TEST_CASE ("the processor renders silence without touching the real-time rules",
     processor.releaseResources();
 }
 
+TEST_CASE ("all notes off controller releases active voices", "[plugin][midi]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    juce::AudioBuffer<float> buffer (2, kBlockSize);
+    juce::MidiBuffer midi;
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (testSf2File()));
+    const auto [bank, program] = loader.firstPresetProgram();
+    int soundingKey = -1;
+    for (int key = 0; key < 128 && soundingKey < 0; ++key)
+        if (loader.getSample (bank, program, key, 100) != nullptr)
+            soundingKey = key;
+    REQUIRE (soundingKey >= 0);
+    processor.loadSoundFont (testSf2File());
+    processor.selectPreset (bank, program);
+
+    midi.addEvent (juce::MidiMessage::noteOn (1, soundingKey, static_cast<juce::uint8> (100)), 0);
+    processor.processBlock (buffer, midi);
+    const float soundingPeak = buffer.getMagnitude (0, buffer.getNumSamples());
+    REQUIRE (soundingPeak > 0.0f);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 0);
+    processor.processBlock (buffer, midi);
+
+    float peak = buffer.getMagnitude (0, buffer.getNumSamples());
+    for (int i = 0; i < 64 && peak > 1.0e-6f; ++i)
+    {
+        midi.clear();
+        processor.processBlock (buffer, midi);
+        peak = buffer.getMagnitude (0, buffer.getNumSamples());
+    }
+
+    // The processor's post-voice FX may retain a short tail, but the active
+    // voice must be released rather than continuing at its original level.
+    REQUIRE (peak < soundingPeak * 0.1f);
+    processor.releaseResources();
+}
+
 TEST_CASE ("the processor declares an instrument bus layout", "[plugin][smoke]")
 {
     aod::RomplerProcessor processor;
@@ -114,6 +210,8 @@ TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
                             aod::ParamIDs::polyLimit,
                             aod::ParamIDs::busTapeDrive,
                             aod::ParamIDs::busFold,
+                            aod::ParamIDs::busFilterCutoff,
+                            aod::ParamIDs::busFilterResonance,
                             aod::ParamIDs::busOsFactor,
                             aod::ParamIDs::outTrim,
                             aod::ParamIDs::outMix,
@@ -122,11 +220,35 @@ TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
                             aod::ParamIDs::fxChorusMix,
                             aod::ParamIDs::fxReverbRoom,
                             aod::ParamIDs::fxReverbDamp,
-                            aod::ParamIDs::fxReverbMix })
+                            aod::ParamIDs::fxReverbMix,
+                            aod::ParamIDs::fxDelayMix,
+                            aod::ParamIDs::fxDelayFeedback,
+                            aod::ParamIDs::envAttack,
+                            aod::ParamIDs::envDecay,
+                            aod::ParamIDs::envSustain,
+                            aod::ParamIDs::envRelease,
+                            aod::ParamIDs::compThreshold,
+                            aod::ParamIDs::compRatio,
+                            aod::ParamIDs::compAttack,
+                            aod::ParamIDs::compRelease,
+                            aod::ParamIDs::compMakeup,
+                            aod::ParamIDs::compMix })
     {
         CAPTURE (id);
         REQUIRE (state.getParameter (id) != nullptr);
     }
+}
+
+TEST_CASE ("a new program starts with a conservative output trim", "[plugin][smoke]")
+{
+    aod::RomplerProcessor processor;
+    const auto* outputTrim = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::outTrim);
+    const auto* compressorMix = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::compMix);
+
+    REQUIRE (outputTrim != nullptr);
+    REQUIRE (compressorMix != nullptr);
+    REQUIRE (std::abs (outputTrim->load() + 3.0f) < 1.0e-5f);
+    REQUIRE (std::abs (compressorMix->load()) < 1.0e-5f);
 }
 
 TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")
@@ -136,14 +258,22 @@ TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")
 
     auto* drive = state.getParameter (aod::ParamIDs::voiceDrive);
     auto* curve = state.getParameter (aod::ParamIDs::voiceCurve);
+    auto* compressorRatio = state.getParameter (aod::ParamIDs::compRatio);
+    auto* compressorMix = state.getParameter (aod::ParamIDs::compMix);
     REQUIRE (drive != nullptr);
     REQUIRE (curve != nullptr);
+    REQUIRE (compressorRatio != nullptr);
+    REQUIRE (compressorMix != nullptr);
 
     drive->setValueNotifyingHost (0.73f);
     curve->setValueNotifyingHost (1.0f);
+    compressorRatio->setValueNotifyingHost (0.55f);
+    compressorMix->setValueNotifyingHost (0.67f);
 
     const float savedDrive = drive->getValue();
     const float savedCurve = curve->getValue();
+    const float savedCompressorRatio = compressorRatio->getValue();
+    const float savedCompressorMix = compressorMix->getValue();
 
     juce::MemoryBlock blob;
     processor.getStateInformation (blob);
@@ -152,9 +282,13 @@ TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")
     // Move both away from the saved values so a no-op restore cannot pass.
     drive->setValueNotifyingHost (0.0f);
     curve->setValueNotifyingHost (0.0f);
+    compressorRatio->setValueNotifyingHost (0.0f);
+    compressorMix->setValueNotifyingHost (0.0f);
 
     processor.setStateInformation (blob.getData(), static_cast<int> (blob.getSize()));
 
     REQUIRE (std::abs (drive->getValue() - savedDrive) < 1.0e-5f);
     REQUIRE (std::abs (curve->getValue() - savedCurve) < 1.0e-5f);
+    REQUIRE (std::abs (compressorRatio->getValue() - savedCompressorRatio) < 1.0e-5f);
+    REQUIRE (std::abs (compressorMix->getValue() - savedCompressorMix) < 1.0e-5f);
 }

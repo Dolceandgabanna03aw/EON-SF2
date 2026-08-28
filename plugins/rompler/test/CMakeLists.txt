@@ -1,4 +1,16 @@
-add_executable(rompler_tests test_plugin_smoke.cpp test_sf2_playback.cpp test_dsp_behaviors.cpp)
+add_executable(rompler_tests
+    test_plugin_smoke.cpp
+    test_sf2_playback.cpp
+    test_dsp_behaviors.cpp
+    test_bus_processor.cpp
+    test_dynamics_processor.cpp
+    test_preset_storage.cpp
+    test_soundfont_resolver.cpp
+    test_preset_library.cpp
+    test_processor_presets.cpp
+    test_preset_browser_overlay.cpp
+    test_knob_init_state.cpp
+    test_editor_preset_header.cpp)
 
 # EONDS50 carries the JucePlugin_* definitions PUBLIC, but JUCE modules
 # are linked PRIVATE on the shared-code target by convention, so their include

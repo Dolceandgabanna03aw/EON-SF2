@@ -92,7 +92,9 @@ bool PresetLibrary::saveIndex() const
     juce::Array<juce::var> slots; for (const auto& id : quickSlots_) slots.add (id); root->setProperty ("quickSlots", juce::var (slots));
     const auto temporary = indexFile().getSiblingFile (".library-index.tmp-" + juce::Uuid().toString());
     { juce::FileOutputStream stream (temporary); if (! stream.openedOk() || ! stream.writeString (juce::JSON::toString (juce::var (root.get()), false))) { temporary.deleteFile(); return false; } stream.flush(); }
-    if (! indexFile().replaceWithFile (temporary)) { temporary.deleteFile(); return false; }
+    const auto destination = indexFile();
+    if (destination.existsAsFile() && ! destination.deleteFile()) { temporary.deleteFile(); return false; }
+    if (! temporary.moveFileTo (destination)) { temporary.deleteFile(); return false; }
     return true;
 }
 void PresetLibrary::applyIndexToEntries() { for (auto& e : entries_) { e.isFavourite = favourites_.contains (e.document.uuid); e.quickSlot = 0; for (int i = 0; i < quickSlotCount; ++i) if (quickSlots_[(size_t) i] == e.document.uuid) e.quickSlot = i + 1; } }

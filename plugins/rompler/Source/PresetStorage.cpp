@@ -84,7 +84,12 @@ PresetStorage::WriteStatus PresetStorage::writeAtomically (const PresetDocument&
     if (! destination.getParentDirectory().createDirectory().wasOk()) return WriteStatus::temporaryFileFailed;
     const auto temporary = destination.getSiblingFile ("." + destination.getFileName() + ".tmp-" + juce::Uuid().toString());
     { juce::FileOutputStream stream (temporary); if (! stream.openedOk() || ! stream.writeString (toJson (document))) { temporary.deleteFile(); return WriteStatus::temporaryFileFailed; } stream.flush(); }
-    const bool replaced = destination.replaceWithFile (temporary);
+    if (destination.existsAsFile() && ! destination.deleteFile())
+    {
+        temporary.deleteFile();
+        return WriteStatus::replaceFailed;
+    }
+    const bool replaced = temporary.moveFileTo (destination);
     if (! replaced) { temporary.deleteFile(); return WriteStatus::replaceFailed; }
     return WriteStatus::ok;
 }

@@ -10,8 +10,9 @@ namespace aod
 {
 
 /**
-    Master bus nonlinear stage: tape-style saturation, then a wavefolder,
-    both run inside an oversampled block to keep their aliasing under control.
+    Master bus nonlinear stage: tape-style saturation, a wavefolder, then a
+    nonlinear resonant low-pass filter. All stages run inside an oversampled
+    block to keep their generated harmonics under control.
 
     Oversampling factor is chosen per block from the Oversampling parameter
     (1x/2x/4x/8x). All four juce::dsp::Oversampling instances are built once in
@@ -26,7 +27,8 @@ public:
     void reset();
 
     /**
-        tapeDrivePercent, foldPercent: 0-100, straight from APVTS.
+        tapeDrivePercent, foldPercent, filterResonancePercent: 0-100,
+        straight from APVTS. filterCutoffHz is 20-20000 Hz.
         osFactorIndex: 0=1x, 1=2x, 2=4x, 3=8x.
 
         The oversampling factor is fixed for the lifetime of a prepareToPlay
@@ -38,7 +40,7 @@ public:
         process() call until the next prepareToPlay().
     */
     void process (juce::AudioBuffer<float>& buffer, float tapeDrivePercent, float foldPercent,
-                  int osFactorIndex) noexcept;
+                  float filterCutoffHz, float filterResonancePercent, int osFactorIndex) noexcept;
 
     [[nodiscard]] int getLatencySamples (int osFactorIndex) const noexcept;
 
@@ -48,7 +50,19 @@ private:
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, numFactors> oversamplers_;
     std::vector<x10::dsp::DCBlocker> dcBlockers_;
 
+    struct FilterState
+    {
+        std::vector<float> low;
+        std::vector<float> band;
+    };
+    std::array<FilterState, numFactors> filterStates_;
+    float smoothedCutoffHz_ = 20000.0f;
+    float smoothedResonance_ = 0.0f;
+    float sampleRate_ = 48000.0f;
+
     [[nodiscard]] static float foldSample (float x, float amount) noexcept;
+    [[nodiscard]] static float processFilterSample (float x, float cutoffHz, float resonance,
+                                                     float sampleRate, float& low, float& band) noexcept;
 };
 
 } // namespace aod

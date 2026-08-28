@@ -2,9 +2,9 @@ juce_add_plugin(EONDS50
     PLUGIN_MANUFACTURER_CODE    Sngh
     PLUGIN_CODE                 Eon1
     FORMATS                     VST3 AU Standalone
-    PRODUCT_NAME                "EON-DS50"
+    PRODUCT_NAME                "Aoi YUME"
     DESCRIPTION                 "Polyphonic SF2 rompler with per-voice nonlinear drive"
-    COMPANY_NAME                "Sisyphus Audio"
+    COMPANY_NAME                "EON LAB"
     BUNDLE_ID                   com.sisyphus.eon-ds50
     IS_SYNTH                    TRUE
     NEEDS_MIDI_INPUT            TRUE
@@ -18,10 +18,15 @@ juce_add_plugin(EONDS50
 target_sources(EONDS50 PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/PresetBrowserOverlay.cpp
     Source/Sampler.cpp
     Source/SF2Loader.cpp
     Source/BusProcessor.cpp
-    Source/FxProcessor.cpp)
+    Source/DynamicsProcessor.cpp
+    Source/FxProcessor.cpp
+    Source/PresetStorage.cpp
+    Source/SoundFontResolver.cpp
+    Source/PresetLibrary.cpp)
 target_include_directories(EONDS50 PRIVATE Source)
 
 target_compile_definitions(EONDS50 PUBLIC
@@ -66,25 +71,44 @@ endif()
 target_compile_options(EONDS50 PRIVATE -Wall -Wextra -Wpedantic -Werror -Wshadow)
 
 # --------------------------------------------------------------------------
-# Bundled SoundFont
+# Bundled SoundFonts
 #
-# The M1 Legacy SoundFont is shipped inside the plugin bundle's
-# Contents/Resources directory so the plugin is immediately playable without a
-# manual Load step. The processor looks for the first *.sf2 there at startup.
+# Three SoundFonts are shipped inside the plugin bundle's
+# Contents/Resources/SoundFonts directory so the plugin is immediately
+# playable without a manual Load step. The M1 Legacy SoundFont is the
+# deterministic startup default (matched by exact filename at runtime); the
+# other two are simply available in the bundled-fonts picker. Missing sources
+# fail the configure step loudly rather than silently shipping an incomplete
+# bundle.
 # --------------------------------------------------------------------------
-set(EONDS50_BUNDLED_SF2
+set(EONDS50_BUNDLED_SF2_M1LEGACY
     "${CMAKE_CURRENT_SOURCE_DIR}/../../testdata/sf2/Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2")
+set(EONDS50_BUNDLED_SF2_LIVEHQ
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../testdata/sf2/Live HQ Natural SoundFont GM.sf2")
+set(EONDS50_BUNDLED_SF2_SGM
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../testdata/sf2/SGM-v2.01-NicePianosGuitarsBass-V1.2.sf2")
 
-if(APPLE AND EXISTS "${EONDS50_BUNDLED_SF2}")
-    foreach(fmt VST3 AU)
+foreach(sf2file
+        "${EONDS50_BUNDLED_SF2_M1LEGACY}"
+        "${EONDS50_BUNDLED_SF2_LIVEHQ}"
+        "${EONDS50_BUNDLED_SF2_SGM}")
+    if(NOT EXISTS "${sf2file}")
+        message(FATAL_ERROR "Missing bundled SoundFont: ${sf2file}")
+    endif()
+endforeach()
+
+if(APPLE)
+    foreach(fmt VST3 AU Standalone)
         if(TARGET EONDS50_${fmt})
             add_custom_command(TARGET EONDS50_${fmt} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E make_directory
-                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources"
+                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources/SoundFonts"
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "${EONDS50_BUNDLED_SF2}"
-                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources/"
-                COMMENT "Bundling SoundFont into ${fmt}"
+                        "${EONDS50_BUNDLED_SF2_M1LEGACY}"
+                        "${EONDS50_BUNDLED_SF2_LIVEHQ}"
+                        "${EONDS50_BUNDLED_SF2_SGM}"
+                        "$<GENEX_EVAL:$<TARGET_PROPERTY:EONDS50_${fmt},JUCE_PLUGIN_ARTEFACT_FILE>>/Contents/Resources/SoundFonts/"
+                COMMENT "Bundling SoundFonts into ${fmt}"
                 VERBATIM)
         endif()
     endforeach()
