@@ -28,3 +28,4 @@ outputs/Icon?
 # JUCE plugin target copies a resource tree that contains one, codesign
 # rejects the bundle as carrying "detritus" and the build fails.
 Icon?
+.worktrees/
