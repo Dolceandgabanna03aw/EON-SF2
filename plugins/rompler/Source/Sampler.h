@@ -61,11 +61,8 @@ public:
         No-op if the voice is not currently active.
     */
     void retarget(const Sample* sample, int midiNote) noexcept;
-<<<<<<< Updated upstream
     /** Immediately retires the slot and clears its current note ownership. */
     void retire() noexcept;
-=======
->>>>>>> Stashed changes
     /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
@@ -100,11 +97,6 @@ private:
     float envelopeLevel_ = 0.0f;
     BankToken bankToken_;
     std::uint64_t startSequence_ = 0;
-
-    // Per-voice vibrato LFO phase, in radians. Advances at a fixed musical
-    // rate (see kVibratoRateHz in Sampler.cpp) independent of pitch bend;
-    // reset on start() so every fresh attack begins at a consistent phase.
-    double vibratoPhase_ = 0.0;
 
     // Per-voice vibrato LFO phase, in radians. Advances at a fixed musical
     // rate (see kVibratoRateHz in Sampler.cpp) independent of pitch bend;
@@ -209,20 +201,6 @@ private:
     void releaseNote(int midiNote) noexcept;
     void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept;
     [[nodiscard]] bool isProtectedFromStealing(std::size_t voiceIndex) const noexcept;
-
-    bool sustainHeld_ = false;
-    bool legatoEnabled_ = false;
-    // Keys currently physically held down (independent of sustain pedal),
-    // used to decide whether a legato retarget is possible.
-    std::array<bool, 128> keyHeld_ {};
-    int heldKeyCount_ = 0;
-    // Notes whose note-off was deferred because the sustain pedal was held.
-    std::array<bool, 128> pendingRelease_ {};
-    // Index of the most recently triggered/retargeted voice, used as the
-    // legato "lead voice" target for the next retarget.
-    int leadVoiceIndex_ = -1;
-
-    void releaseNote(int midiNote) noexcept;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;
 };
