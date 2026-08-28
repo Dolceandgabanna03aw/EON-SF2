@@ -139,7 +139,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         envParamHash_ = hash;
         adsr_.setAttackSec (attackMs * 0.001f);
         adsr_.setDecaySec (decayMs * 0.001f);
-        adsr_.setSustainLevel (sustainLevel);
+        adsr_.setSustainLevel (sustainLevel * 0.01f);  // Convert 0-100% to 0.0-1.0
         adsr_.setReleaseSec (releaseMs * 0.001f);
     }
 

@@ -200,13 +200,13 @@ TEST_CASE ("legato retarget to a shorter sample resets sample-dependent state", 
     {
         std::fill (block.begin(), block.end(), 0.0f);
         pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 100.0f, 100.0f, 0.0f, 0.0f);
     }
 
     pool.start (&shortSample, 62, 1.0f);
     std::fill (block.begin(), block.end(), 0.0f);
     pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 100.0f, 100.0f, 0.0f, 0.0f);
 
     REQUIRE (pool.voiceIndexForNote (60) == -1);
     REQUIRE (pool.voiceIndexForNote (62) == 0);
@@ -226,7 +226,7 @@ TEST_CASE ("ADSR sustain level uses normalized unity range", "[dsp][voice][envel
     {
         std::fill (block.begin(), block.end(), 0.0f);
         pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.5f, 100.0f, 0.0f, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 50.0f, 100.0f, 0.0f, 0.0f);
     }
 
     REQUIRE (blockPeak (block.data(), static_cast<int> (block.size()))
