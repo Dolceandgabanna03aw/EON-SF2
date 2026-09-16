@@ -1,4 +1,5 @@
 #include "Sampler.h"
+#include "BandLimitedInterpolator.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -32,6 +33,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     envelopeLevel_ = 0.0f;
     vibratoPhase_ = 0.0;
     active_ = true;
+    driveNeedsReset_ = true;
     filterNeedsPrepare_ = true;
 
     // Copy loop points at start(): render() must not read through a sample
@@ -41,6 +43,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     loopStart_ = sample->loopStart;
     loopEnd_   = sample->loopEnd;
     loopEnabled_ = sample->loopEnabled && loopEnd_ > loopStart_ + 1;
+    hasLoopWrapped_ = false;
 
     // Pitch: the sample is recorded at rootKey. A note played N semitones above
     // rootKey must advance N semitones faster (pitch ratio 2^(N/12)); the
@@ -65,6 +68,7 @@ void Voice::retarget(const Sample* sample, int midiNote) noexcept
         loopStart_ = sample->loopStart;
         loopEnd_ = sample->loopEnd;
         loopEnabled_ = sample->loopEnabled && loopEnd_ > loopStart_ + 1;
+        hasLoopWrapped_ = false;
     }
 
     sample_ = sample;
@@ -95,7 +99,8 @@ bool Voice::isReleasing() const noexcept
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                     int curveId, int filterRouting, float filterOffsetCents,
                     float attackMs, float decayMs, float sustainLevel, float releaseMs,
-                    float pitchBendSemitones, float vibratoDepthCents) noexcept
+                    float pitchBendSemitones, float vibratoDepthCents,
+                    const BandLimitedInterpolator& interpolator) noexcept
 {
     if (!active_)
     {
@@ -139,7 +144,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         envParamHash_ = hash;
         adsr_.setAttackSec (attackMs * 0.001f);
         adsr_.setDecaySec (decayMs * 0.001f);
-        adsr_.setSustainLevel (sustainLevel * 0.01f);  // Convert 0-100% to 0.0-1.0
+        adsr_.setSustainLevel (std::clamp (sustainLevel, 0.0f, 1.0f));
         adsr_.setReleaseSec (releaseMs * 0.001f);
     }
 
@@ -156,7 +161,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     // makes hard hits drive harder and -100% does the inverse. This is an
     // additional dB offset centred so a velocity of 127 (1.0) is the reference.
     const float velDriveDb = driveDb + velToDriveDb * (velocity_ - 1.0f);
-    const float driveGain = std::pow (10.0f, velDriveDb / 20.0f);
+    if (driveNeedsReset_)
+    {
+        driveDbSmooth_.reset (static_cast<double> (hostSampleRate), 0.005);
+        driveDbSmooth_.setCurrentAndTargetValue (velDriveDb);
+        driveNeedsReset_ = false;
+    }
+    driveDbSmooth_.setTargetValue (velDriveDb);
 
     // Loop points as sample-frame indices into sampleData. While looping, phase_
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
@@ -171,6 +182,9 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const double vibratoIncrement =
         2.0 * juce::MathConstants<double>::pi * static_cast<double> (kVibratoRateHz)
         / static_cast<double> (hostSampleRate);
+
+    const double fixedRate = playRate_ * std::pow (2.0, static_cast<double> (pitchBendSemitones) / 12.0);
+    const float fixedPosition = interpolator.positionForRate (fixedRate);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -188,11 +202,14 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // keeps a live wheel/CC1 change instantaneous without recomputing or
         // resetting the cached rate (which would otherwise jump the read
         // phase).
-        const float vibratoSemitones =
-            (vibratoDepthCents * static_cast<float> (std::sin (vibratoPhase_))) / 100.0f;
-        const double pitchRatio = std::pow (2.0,
-            (static_cast<double> (pitchBendSemitones) + static_cast<double> (vibratoSemitones)) / 12.0);
-        const double effectiveRate = playRate_ * pitchRatio;
+        double effectiveRate = fixedRate;
+        if (vibratoDepthCents != 0.0f)
+        {
+            const float vibratoSemitones =
+                (vibratoDepthCents * static_cast<float> (std::sin (vibratoPhase_))) / 100.0f;
+            effectiveRate = playRate_ * std::pow (2.0,
+                (static_cast<double> (pitchBendSemitones) + static_cast<double> (vibratoSemitones)) / 12.0);
+        }
 
         if (!looping)
         {
@@ -218,10 +235,45 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         const auto index = static_cast<std::int64_t>(phase_);
         const float frac = static_cast<float>(phase_ - static_cast<double>(index));
-        const float s0 = sampleData[static_cast<std::size_t>(index)];
-        const auto s1Index = (index + 1 < sampleCount) ? index + 1 : sampleCount - 1;
-        const float s1 = sampleData[static_cast<std::size_t>(s1Index)];
-        const float interpolated = s0 + frac * (s1 - s0);
+
+        // Reading faster than 1x lifts the source spectrum, so anything above
+        // the output Nyquist would fold back as an audible tone. The shared
+        // sinc table band-limits the read for the rate actually being played;
+        // taps wrap inside an active loop so the seam stays continuous, and
+        // clamp at the ends so a one-shot never reads outside its buffer.
+        const float position = vibratoDepthCents != 0.0f ? interpolator.positionForRate (effectiveRate) : fixedPosition;
+        // Interior kernels never need edge clamps or loop modulo per tap.
+        // Keep the guarded reader for the sample head, tail, and loop seams.
+        const auto firstTap = index - BandLimitedInterpolator::kCentreTap;
+        const auto lastTap = firstTap + BandLimitedInterpolator::kNumTaps - 1;
+        const bool contiguous = firstTap >= 0 && lastTap < sampleCount
+            && (!looping || (lastTap < loopEnd && (!hasLoopWrapped_ || firstTap >= loopStart)));
+        const float interpolated = contiguous
+            ? interpolator.interpolateRate (position, frac,
+                [&] (int offset) noexcept { return sampleData[index + offset]; })
+            : interpolator.interpolateRate (position, frac,
+            [&] (int offset) noexcept
+            {
+                std::int64_t tapIndex = index + offset;
+
+                if (looping)
+                {
+                    const std::int64_t loopLength = loopEnd - loopStart;
+                    if (loopLength > 0)
+                    {
+                        if (tapIndex >= loopEnd || (hasLoopWrapped_ && tapIndex < loopStart))
+                        {
+                            auto relative = (tapIndex - loopStart) % loopLength;
+                            if (relative < 0)
+                                relative += loopLength;
+                            tapIndex = loopStart + relative;
+                        }
+                    }
+                }
+
+                tapIndex = std::clamp<std::int64_t> (tapIndex, 0, sampleCount - 1);
+                return sampleData[static_cast<std::size_t>(tapIndex)];
+            });
 
         float sample = interpolated * velocity_ * env;
 
@@ -229,13 +281,22 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             sample = filter_.process (sample);
 
         // Apply nonlinear drive based on curve ID
-        const float driven = driveGain * sample;
-        if (curveId == 1)
-            sample = x10::dsp::curves::Tube::f (driven) / driveGain;
-        else if (curveId == 2)
-            sample = x10::dsp::curves::Transformer::f (driven) / driveGain;
-        else // curveId == 0 or default
-            sample = x10::dsp::curves::Tanh::f (driven) / driveGain;
+        const float currentDriveDb = driveDbSmooth_.getNextValue();
+        const float driveBlendPosition = std::clamp (std::abs (currentDriveDb), 0.0f, 1.0f);
+        const float driveBlend = driveBlendPosition * driveBlendPosition * (3.0f - 2.0f * driveBlendPosition);
+        if (driveBlend > 0.0f)
+        {
+            const float driveGain = std::pow (10.0f, currentDriveDb / 20.0f);
+            const float driven = driveGain * sample;
+            float coloured = sample;
+            if (curveId == 1)
+                coloured = x10::dsp::curves::Tube::f (driven) / driveGain;
+            else if (curveId == 2)
+                coloured = x10::dsp::curves::Transformer::f (driven) / driveGain;
+            else // curveId == 0 or default
+                coloured = x10::dsp::curves::Tanh::f (driven) / driveGain;
+            sample += driveBlend * (coloured - sample);
+        }
 
         if (filterRouting != 0) // Post: filter after drive
             sample = filter_.process (sample);
@@ -251,7 +312,10 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // loopStart_ keeping the fractional part, so the interpolation phase is
         // continuous across the wrap and the loop does not click.
         if (looping && phase_ >= static_cast<double>(loopEnd))
+        {
             phase_ -= static_cast<double>(loopEnd - loopStart);
+            hasLoopWrapped_ = true;
+        }
 
         envPhase_ += 1.0f / static_cast<float>(hostSampleRate);
     }
@@ -540,7 +604,7 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
             voices_[i].render(output, numSamples, hostSampleRate, driveDb, velToDriveDb,
                               curveId, filterRouting, filterOffsetCents,
                               attackMs, decayMs, sustainLevel, releaseMs,
-                              pitchBendSemitones, vibratoDepthCents);
+                              pitchBendSemitones, vibratoDepthCents, *interpolator_);
             if (!voices_[i].isActive())
             {
                 const int note = voices_[i].note();

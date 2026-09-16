@@ -35,6 +35,7 @@ public:
     [[nodiscard]] LibraryStatus exportPackage (const juce::String&, const juce::File&, bool) const;
     [[nodiscard]] juce::String proposeUniqueName (const juce::String&) const;
     void setSoundFontResolver (SoundFontResolver resolver);
+    [[nodiscard]] SoundFontResolver::Result resolveSoundFont (const PresetDocument&) const;
     [[nodiscard]] LibraryStatus relinkSoundFont (const juce::String&, const juce::File&);
     std::function<void()> onCatalogueChanged;
 private:

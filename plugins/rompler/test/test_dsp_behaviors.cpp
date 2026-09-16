@@ -32,6 +32,18 @@ float blockPeak (const float* output, int numSamples)
         peak = std::max (peak, std::abs (output[i]));
     return peak;
 }
+
+float tailRms (const std::vector<float>& output, int tailSamples)
+{
+    const int firstSample = juce::jmax (0, static_cast<int> (output.size()) - tailSamples);
+    float sumSquares = 0.0f;
+
+    for (int sample = firstSample; sample < static_cast<int> (output.size()); ++sample)
+        sumSquares += output[static_cast<std::size_t> (sample)]
+                    * output[static_cast<std::size_t> (sample)];
+
+    return std::sqrt (sumSquares / static_cast<float> (static_cast<int> (output.size()) - firstSample));
+}
 } // namespace
 
 TEST_CASE ("voice pool prepares the public 128-voice default capacity", "[dsp][voice]")
@@ -55,6 +67,28 @@ TEST_CASE ("voice pool starts all 128 MIDI notes concurrently", "[dsp][rt][voice
     REQUIRE (pool.activeVoiceCount() == 128);
     for (int note = 0; note < 128; ++note)
         REQUIRE (pool.voiceIndexForNote (note) == note);
+}
+
+TEST_CASE ("normalized sustain remains audible after decay", "[dsp][voice][level]")
+{
+    aod::VoicePool pool (1);
+    const aod::Sample sample = makeTone();
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+
+    pool.start (&sample, 60, 1.0f);
+    for (int render = 0; render < 4; ++render)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f,
+                     0.0f, 5.0f, 1.0f, 80.0f,
+                     0.0f, 0.0f);
+    }
+
+    // PluginProcessor sends sustain as an already normalized 0..1 value.
+    // A full sustain must therefore retain a musically usable level after the
+    // decay stage, rather than being attenuated a second time.
+    REQUIRE (tailRms (block, kBlockSize / 2) > 0.3f);
 }
 
 TEST_CASE ("stealing a release voice clears only its victim note mapping", "[dsp][voice]")
@@ -200,13 +234,13 @@ TEST_CASE ("legato retarget to a shorter sample resets sample-dependent state", 
     {
         std::fill (block.begin(), block.end(), 0.0f);
         pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
     }
 
     pool.start (&shortSample, 62, 1.0f);
     std::fill (block.begin(), block.end(), 0.0f);
     pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 100.0f, 0.0f, 0.0f);
 
     REQUIRE (pool.voiceIndexForNote (60) == -1);
     REQUIRE (pool.voiceIndexForNote (62) == 0);
@@ -226,11 +260,14 @@ TEST_CASE ("ADSR sustain level uses normalized unity range", "[dsp][voice][envel
     {
         std::fill (block.begin(), block.end(), 0.0f);
         pool.render (block.data(), static_cast<int> (block.size()), kSampleRate,
-                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 50.0f, 100.0f, 0.0f, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 1.0f, 0.5f, 100.0f, 0.0f, 0.0f);
     }
 
+    // Sustain is a normalized level, so a full-scale source held at 50%
+    // sustain must arrive at 0.5. At Drive 0 the voice bypasses its saturation
+    // curve, so the level is no longer pulled down to tanh(0.5).
     REQUIRE (blockPeak (block.data(), static_cast<int> (block.size()))
-             == Catch::Approx (x10::dsp::curves::Tanh::f (0.5f)).margin (0.03f));
+             == Catch::Approx (0.5f).margin (0.03f));
 }
 
 TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
@@ -650,13 +687,13 @@ TEST_CASE ("legato retarget to shorter sample does not OOB", "[dsp][legato][oob]
     {
         std::fill (block.begin(), block.end(), 0.0f);
         pool.render (block.data(), 512, kSampleRate,
-                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 1.0f, 100.0f, 100.0f, 0.0f);
     }
     
     pool.start (&shortSample, 61, 1.0f);
     std::fill (block.begin(), block.end(), 0.0f);
     pool.render (block.data(), 512, kSampleRate,
-                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f);
+                 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 10.0f, 1.0f, 100.0f, 100.0f, 0.0f);
     
     REQUIRE (pool.voiceIndexForNote (61) == 0);
 }
@@ -677,7 +714,7 @@ TEST_CASE ("polyphony shrink clears high-index voices", "[dsp][polyphony]")
     
     std::fill (block.begin(), block.end(), 0.0f);
     pool.render (block.data(), 512, kSampleRate,
-                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 1.0f, 100.0f, 0.0f, 0.0f);
     
     REQUIRE (pool.activeVoiceCount() <= 32);
     
@@ -685,7 +722,7 @@ TEST_CASE ("polyphony shrink clears high-index voices", "[dsp][polyphony]")
     
     std::fill (block.begin(), block.end(), 0.0f);
     pool.render (block.data(), 512, kSampleRate,
-                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 100.0f, 100.0f, 0.0f, 0.0f);
+                 0.0f, 0.0f, 0, 0, 0.0f, 10.0f, 100.0f, 1.0f, 100.0f, 0.0f, 0.0f);
     
     REQUIRE (pool.activeVoiceCount() <= 32);
 }

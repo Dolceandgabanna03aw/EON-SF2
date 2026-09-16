@@ -95,6 +95,16 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
     const int noteA = juce::jlimit (0, 115, static_cast<int> (std::lround (sample->rootKey)));
     const int noteB = noteA + 12;
 
+    // Preserve the loaded region's pitch metadata but use a known fundamental.
+    // Counting crossings of an arbitrary SF2 waveform also counts harmonics;
+    // band-limiting can change that count without changing playback pitch.
+    aod::Sample pitchProbe = *sample;
+    pitchProbe.loopEnabled = false;
+    pitchProbe.data.resize (96000);
+    for (std::size_t frame = 0; frame < pitchProbe.data.size(); ++frame)
+        pitchProbe.data[frame] = static_cast<float> (0.5 * std::sin (
+            2.0 * juce::MathConstants<double>::pi * 1000.0 * static_cast<double> (frame) / kSampleRate));
+
     auto zeroCrossings = [] (aod::Sample* s, int note, int blockSize)
     {
         aod::VoicePool pool (1);
@@ -115,11 +125,12 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
     };
 
     constexpr int kBigBlock = 8192;
-    const int zcA = zeroCrossings (sample, noteA, kBigBlock);
-    const int zcB = zeroCrossings (sample, noteB, kBigBlock);
+    const int zcA = zeroCrossings (&pitchProbe, noteA, kBigBlock);
+    const int zcB = zeroCrossings (&pitchProbe, noteB, kBigBlock);
 
     REQUIRE (zcA > 20); // the sample must actually oscillate
     REQUIRE (zcB > 20);
     const double ratio = static_cast<double> (zcB) / static_cast<double> (zcA);
-    REQUIRE (std::abs (ratio - expectedRatio) < 0.2);
+    CAPTURE (zcA, zcB, ratio, expectedRatio);
+    REQUIRE (std::abs (ratio - expectedRatio) < 0.02);
 }

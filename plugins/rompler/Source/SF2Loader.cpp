@@ -1,5 +1,8 @@
 #include "SF2Loader.h"
+#include "BandLimitedInterpolator.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace aod
@@ -144,26 +147,48 @@ void SF2Loader::resampleToHostRate(Sample& sample)
 
     std::vector<float> resampled(newSize);
 
+    // Rate conversion happens once, on the loading thread, so it uses the same
+    // band-limited kernel the voices use rather than a linear approximation.
+    // Downward conversion also needs the source band-limited first, otherwise
+    // content above the new Nyquist folds into the stored PCM permanently.
+    const auto& interpolator = BandLimitedInterpolator::shared();
+    const double sourceStep = 1.0 / static_cast<double>(ratio);
+    const float position = interpolator.positionForRate(sourceStep);
+    const auto sourceCount = static_cast<std::int64_t>(sample.data.size());
+
     for (std::size_t i = 0; i < newSize; ++i)
     {
-        const float phase = static_cast<float>(i) / ratio;
-        const auto index = static_cast<std::size_t>(phase);
+        const double phase = static_cast<double>(i) * sourceStep;
+        const auto index = static_cast<std::int64_t>(phase);
+        const auto frac = static_cast<float>(phase - static_cast<double>(index));
 
-        if (index >= sample.data.size() - 1)
-        {
-            resampled[i] = sample.data.back();
-        }
-        else
-        {
-            const float frac = phase - static_cast<float>(index);
-            const float s0 = sample.data[index];
-            const float s1 = sample.data[index + 1];
-            resampled[i] = s0 + frac * (s1 - s0);
-        }
+        resampled[i] = interpolator.interpolateRate(position, frac,
+            [&](int offset) noexcept
+            {
+                const auto tapIndex = std::clamp<std::int64_t>(index + offset, 0, sourceCount - 1);
+                return sample.data[static_cast<std::size_t>(tapIndex)];
+            });
     }
 
     sample.data = std::move(resampled);
     sample.sampleRate = hostSampleRate_;
+
+    // Loop points are stored in frames, so they have to follow the new rate or
+    // a converted sample loops at the wrong place.
+    const auto scaleStartPoint = [&](int point)
+    {
+        const auto scaled = static_cast<std::int64_t>(std::llround(static_cast<double>(point) * static_cast<double>(ratio)));
+        return static_cast<int>(std::clamp<std::int64_t>(scaled, 0, static_cast<std::int64_t>(newSize) - 1));
+    };
+    // loopEnd is an exclusive boundary in the playback engine. It is allowed
+    // to equal newSize, unlike a start point that must address a frame.
+    const auto scaleEndPoint = [&](int point)
+    {
+        const auto scaled = static_cast<std::int64_t>(std::llround(static_cast<double>(point) * static_cast<double>(ratio)));
+        return static_cast<int>(std::clamp<std::int64_t>(scaled, 0, static_cast<std::int64_t>(newSize)));
+    };
+    sample.loopStart = scaleStartPoint(sample.loopStart);
+    sample.loopEnd = scaleEndPoint(sample.loopEnd);
 }
 
 } // namespace aod

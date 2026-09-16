@@ -43,6 +43,7 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     dynamicsProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
+    outputSafetyProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     fxProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
 
     // The oversampling factor is fixed for this prepareToPlay session; see
@@ -353,6 +354,7 @@ void RomplerProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start,
                           blockParameters_.delayMix, blockParameters_.delayFeedback,
                           blockParameters_.bpm);
     range.applyGain (blockParameters_.outputGain);
+    outputSafetyProcessor_.process (range);
 }
 
 void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
@@ -450,7 +452,10 @@ void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
                 // those documents by checking the current directory first,
                 // then the packaged SoundFonts directory.
                 if (! file.existsAsFile())
-                    file = getBundledSoundFontsDirectory().getChildFile (fileName);
+                {
+                    const auto bundledName = canonicalBundledSoundFontFileName (file.getFileName());
+                    file = getBundledSoundFontsDirectory().getChildFile (bundledName);
+                }
                 if (file.existsAsFile())
                     loadSoundFont (file, idx);
             }
@@ -548,6 +553,17 @@ bool RomplerProcessor::isBankLoaded(int bankSlot) const noexcept
     return sf2Loaders_[static_cast<std::size_t> (bankSlot)] != nullptr;
 }
 
+juce::String RomplerProcessor::canonicalBundledSoundFontFileName (const juce::String& fileName)
+{
+    if (fileName == "Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2")
+        return "Crystal Legacy.sf2";
+    if (fileName == "Live HQ Natural SoundFont GM.sf2")
+        return "Natural Stage.sf2";
+    if (fileName == "SGM-v2.01-NicePianosGuitarsBass-V1.2.sf2")
+        return "Studio Essentials.sf2";
+    return fileName;
+}
+
 // ---------------------------------------------------------------------------
 // Bundled SoundFont
 // ---------------------------------------------------------------------------
@@ -561,7 +577,7 @@ namespace
 {
     /** The exact filename picked as the startup default; must stay in sync
         with the bundling logic in plugins/rompler/CMakeLists.txt. */
-    constexpr const char* kDefaultBundledSoundFontName = "Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2";
+    constexpr const char* kDefaultBundledSoundFontName = "Crystal Legacy.sf2";
 
 #if JUCE_MAC
     /** <bundle>/Contents/Resources, located by walking up from this module's

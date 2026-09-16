@@ -11,6 +11,7 @@
 #include "SF2Loader.h"
 #include "BusProcessor.h"
 #include "DynamicsProcessor.h"
+#include "OutputSafetyProcessor.h"
 #include "FxProcessor.h"
 #include "PresetModel.h"
 #include "RealtimeQueue.h"
@@ -120,9 +121,13 @@ public:
     void switchBank (int bankSlot);
 
     [[nodiscard]] static constexpr int getMaxBanks() noexcept { return maxBanks; }
+    [[nodiscard]] static juce::String canonicalBundledSoundFontFileName (const juce::String& fileName);
     [[nodiscard]] int getActiveBankSlot() const noexcept { return activeBankSlot_.load (std::memory_order_relaxed); }
     [[nodiscard]] bool isBankLoaded (int bankSlot) const noexcept;
-    [[nodiscard]] const juce::String& getBankName (int bankSlot) const noexcept { return bankNames_[static_cast<std::size_t> (bankSlot)]; }
+    [[nodiscard]] juce::String getBankName (int bankSlot) const noexcept
+    {
+        return juce::File (bankNames_[static_cast<std::size_t> (bankSlot)]).getFileNameWithoutExtension();
+    }
     [[nodiscard]] const juce::String& getBankPath (int bankSlot) const noexcept { return bankNames_[static_cast<std::size_t> (bankSlot)]; }
 
     /**
@@ -137,7 +142,7 @@ public:
     [[nodiscard]] juce::String getLoadedFileName() const noexcept
     {
         const int slot = activeBankSlot_.load (std::memory_order_relaxed);
-        return bankNames_[static_cast<std::size_t> (slot)];
+        return getBankName (slot);
     }
 
     [[nodiscard]] int getPresetCount() const noexcept;
@@ -261,7 +266,8 @@ private:
         int polyphony = VoicePool::maxVoices;
         float attackMs = 0.0f;
         float decayMs = 0.0f;
-        float sustainLevel = 100.0f;
+        // Voice and ADSR contracts use a normalized 0..1 sustain level.
+        float sustainLevel = 1.0f;
         float releaseMs = 0.0f;
         float pitchBendSemitones = 0.0f;
         float vibratoDepthCents = 0.0f;
@@ -316,6 +322,7 @@ private:
     std::unique_ptr<VoicePool> voicePool_;
     BusProcessor busProcessor_;
     DynamicsProcessor dynamicsProcessor_;
+    OutputSafetyProcessor outputSafetyProcessor_;
     FxProcessor fxProcessor_;
     BlockParameters blockParameters_;
     int cachedOsFactorIndex_ = 2;

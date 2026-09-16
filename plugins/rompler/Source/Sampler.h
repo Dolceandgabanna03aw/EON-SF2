@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BandLimitedInterpolator.h"
+
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <x10/instrument/RegionIndex.h>
 #include <x10/dsp/nonlinear/Curves.h>
@@ -82,16 +84,20 @@ public:
     [[nodiscard]] BankToken bankToken() const noexcept { return bankToken_; }
     void setBankToken(const BankToken& token) noexcept { bankToken_ = token; }
 
+    /** sustainLevel is normalized: 0.0 is silence and 1.0 is unity gain. */
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
                 float attackMs, float decayMs, float sustainLevel, float releaseMs,
-                float pitchBendSemitones, float vibratoDepthCents) noexcept;
+                float pitchBendSemitones, float vibratoDepthCents,
+                const BandLimitedInterpolator& interpolator) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
     double phase_ = 0.0;
     float velocity_ = 0.0f;
     bool active_ = false;
+    juce::SmoothedValue<float> driveDbSmooth_;
+    bool driveNeedsReset_ = true;
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
     float envelopeLevel_ = 0.0f;
@@ -114,6 +120,10 @@ private:
     int loopStart_ = 0;
     int loopEnd_ = 0;
     bool loopEnabled_ = false;
+    // Before the first wrap the sample head must remain readable. Once a
+    // voice has crossed the loop seam, taps below loopStart_ are allowed to
+    // wrap to the loop tail for a continuous band-limited read.
+    bool hasLoopWrapped_ = false;
 
     // Playback rate in source frames per output sample. 1.0 plays the sample at
     // its recorded pitch; a higher MIDI note advances faster, a lower one
@@ -137,6 +147,10 @@ public:
 
     explicit VoicePool(int numVoices = maxVoices)
         : voices_(static_cast<std::size_t>(juce::jmax (1, numVoices)))
+        // Construct the immutable sinc table before any render call. Its
+        // function-local static initialisation can take a lock, so it must not
+        // first occur on the audio thread.
+        , interpolator_(&BandLimitedInterpolator::shared())
         , polyphony_(static_cast<int>(voices_.size()))
     {
         noteToVoice_.fill (-1);
@@ -175,6 +189,7 @@ public:
     */
     void setLegatoEnabled(bool enabled) noexcept;
 
+    /** sustainLevel is normalized: 0.0 is silence and 1.0 is unity gain. */
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
                 float attackMs, float decayMs, float sustainLevel, float releaseMs,
@@ -182,6 +197,7 @@ public:
 
 private:
     std::vector<Voice> voices_;
+    const BandLimitedInterpolator* interpolator_ = nullptr;
     std::array<int, 128> noteToVoice_ {};
     int polyphony_ = 0;
     std::uint64_t nextStartSequence_ = 0;

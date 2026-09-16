@@ -61,6 +61,33 @@ TEST_CASE ("selecting a preset resets knobs but keeps oversampling", "[plugin][s
     REQUIRE (program == 34);
 }
 
+TEST_CASE ("a loaded SoundFont uses its filename stem as the bank display name", "[plugin][bank-name]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::RomplerProcessor processor;
+    processor.loadSoundFont (testSf2File());
+
+    REQUIRE (processor.getBankName (0) == "Dr._Mario_64_Soundfont");
+    REQUIRE (processor.getLoadedFileName() == "Dr._Mario_64_Soundfont");
+    REQUIRE (processor.getBankPath (0) == testSf2File().getFullPathName());
+}
+
+TEST_CASE ("legacy bundled SoundFont filenames map to canonical bank filenames", "[plugin][bank-name]")
+{
+    const std::array<std::pair<juce::String, juce::String>, 3> cases {{
+        { "Sonic_Mania_-_Korg_M1_Legacy_Soundfont.sf2", "Crystal Legacy.sf2" },
+        { "Live HQ Natural SoundFont GM.sf2", "Natural Stage.sf2" },
+        { "SGM-v2.01-NicePianosGuitarsBass-V1.2.sf2", "Studio Essentials.sf2" },
+    }};
+
+    for (const auto& [legacyName, canonicalName] : cases)
+        REQUIRE (aod::RomplerProcessor::canonicalBundledSoundFontFileName (legacyName) == canonicalName);
+
+    REQUIRE (aod::RomplerProcessor::canonicalBundledSoundFontFileName ("User Bank.sf2") == "User Bank.sf2");
+}
+
 /**
     JUCE is initialised and shut down here rather than through a function-local
     static.
@@ -239,16 +266,47 @@ TEST_CASE ("every declared parameter is reachable", "[plugin][smoke]")
     }
 }
 
-TEST_CASE ("a new program starts with a conservative output trim", "[plugin][smoke]")
+TEST_CASE ("a new program starts with neutral voice drive and conservative output trim", "[plugin][smoke]")
 {
     aod::RomplerProcessor processor;
     const auto* outputTrim = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::outTrim);
+    const auto* voiceDrive = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::voiceDrive);
+    const auto* velToDrive = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::voiceVelToDrive);
     const auto* compressorMix = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::compMix);
 
     REQUIRE (outputTrim != nullptr);
+    REQUIRE (voiceDrive != nullptr);
+    REQUIRE (velToDrive != nullptr);
     REQUIRE (compressorMix != nullptr);
+    REQUIRE (std::abs (voiceDrive->load()) < 1.0e-5f);
+    REQUIRE (std::abs (velToDrive->load()) < 1.0e-5f);
     REQUIRE (std::abs (outputTrim->load() + 3.0f) < 1.0e-5f);
     REQUIRE (std::abs (compressorMix->load()) < 1.0e-5f);
+}
+
+TEST_CASE ("a new program starts with clear spatial defaults", "[plugin][defaults]")
+{
+    aod::RomplerProcessor processor;
+    const auto& state = processor.getValueTreeState();
+    const auto* chorusRate = state.getRawParameterValue (aod::ParamIDs::fxChorusRate);
+    const auto* chorusDepth = state.getRawParameterValue (aod::ParamIDs::fxChorusDepth);
+    const auto* chorusMix = state.getRawParameterValue (aod::ParamIDs::fxChorusMix);
+    const auto* reverbRoom = state.getRawParameterValue (aod::ParamIDs::fxReverbRoom);
+    const auto* reverbDamp = state.getRawParameterValue (aod::ParamIDs::fxReverbDamp);
+    const auto* reverbMix = state.getRawParameterValue (aod::ParamIDs::fxReverbMix);
+
+    REQUIRE (chorusRate != nullptr);
+    REQUIRE (chorusDepth != nullptr);
+    REQUIRE (chorusMix != nullptr);
+    REQUIRE (reverbRoom != nullptr);
+    REQUIRE (reverbDamp != nullptr);
+    REQUIRE (reverbMix != nullptr);
+    REQUIRE (std::abs (chorusRate->load() - 0.65f) < 1.0e-5f);
+    REQUIRE (std::abs (chorusDepth->load() - 14.0f) < 1.0e-5f);
+    REQUIRE (std::abs (chorusMix->load() - 8.0f) < 1.0e-5f);
+    REQUIRE (std::abs (reverbRoom->load() - 28.0f) < 1.0e-5f);
+    REQUIRE (std::abs (reverbDamp->load() - 32.0f) < 1.0e-5f);
+    REQUIRE (std::abs (reverbMix->load() - 10.0f) < 1.0e-5f);
 }
 
 TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")

@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 #include <cmath>
 
@@ -18,8 +19,8 @@ void drawMachineScrew (juce::Graphics& g, juce::Point<float> centre, float radiu
     g.setColour (juce::Colour (0x92000000));
     g.fillEllipse (body.translated (0.0f, 1.1f));
 
-    juce::ColourGradient screw (juce::Colour (0xffb8bdb3), body.getTopLeft(),
-                                juce::Colour (0xff3c4741), body.getBottomRight(), false);
+    juce::ColourGradient screw (juce::Colour (0xffb4bac0), body.getTopLeft(),
+                                juce::Colour (0xff3a434b), body.getBottomRight(), false);
     g.setGradientFill (screw);
     g.fillEllipse (body);
     g.setColour (juce::Colour (0x5cffffff));
@@ -42,8 +43,8 @@ void drawChassisRail (juce::Graphics& g, juce::Rectangle<float> rail, int seed)
 {
     g.setColour (juce::Colour (0x9a000000));
     g.fillRoundedRectangle (rail.translated (0.0f, 1.6f), 4.0f);
-    juce::ColourGradient railGrad (juce::Colour (0xff748178), rail.getTopLeft(),
-                                   juce::Colour (0xff18211e), rail.getBottomRight(), false);
+    juce::ColourGradient railGrad (juce::Colour (0xff6f7d8a), rail.getTopLeft(),
+                                   juce::Colour (0xff161e26), rail.getBottomRight(), false);
     g.setGradientFill (railGrad);
     g.fillRoundedRectangle (rail, 4.0f);
     g.setColour (juce::Colour (0x55ffffff));
@@ -125,8 +126,8 @@ void SectionBox::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xa6000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 3.0f), 9.0f);
 
-    juce::ColourGradient bezelGrad (juce::Colour (0xff718078), bounds.getTopLeft(),
-                                    juce::Colour (0xff101716), bounds.getBottomLeft(), false);
+    juce::ColourGradient bezelGrad (juce::Colour (0xff6c7c88), bounds.getTopLeft(),
+                                    juce::Colour (0xff0f151d), bounds.getBottomLeft(), false);
     g.setGradientFill (bezelGrad);
     g.fillRoundedRectangle (bounds, 9.0f);
     g.setColour (juce::Colour (0x5efffff8));
@@ -137,7 +138,7 @@ void SectionBox::paint (juce::Graphics& g)
     g.fillRoundedRectangle (cavity, 6.5f);
     const auto panelFace = cavity.reduced (1.0f);
     juce::ColourGradient panelGrad (theme::panel, panelFace.getTopLeft(),
-                                    juce::Colour (0xff25302c), panelFace.getBottomLeft(), false);
+                                    juce::Colour (0xff232c35), panelFace.getBottomLeft(), false);
     g.setGradientFill (panelGrad);
     g.fillRoundedRectangle (panelFace, 5.6f);
     g.setColour (juce::Colour (0x55ffffff));
@@ -159,8 +160,8 @@ void SectionBox::paint (juce::Graphics& g)
     const auto tabBounds = tab.toFloat();
     g.setColour (juce::Colour (0x8a000000));
     g.fillRoundedRectangle (tabBounds.translated (0.0f, 1.2f), 3.5f);
-    juce::ColourGradient tabGrad (juce::Colour (0xff9fd9c4), tabBounds.getTopLeft(),
-                                 juce::Colour (0xff347d68), tabBounds.getBottomLeft(), false);
+    juce::ColourGradient tabGrad (juce::Colour (0xff9bd9ea), tabBounds.getTopLeft(),
+                                 juce::Colour (0xff317a9e), tabBounds.getBottomLeft(), false);
     g.setGradientFill (tabGrad);
     g.fillRoundedRectangle (tabBounds, 3.5f);
     g.setColour (juce::Colour (0x55ffffff));
@@ -183,14 +184,14 @@ void HardwareButton::paintButton (juce::Graphics& g, bool isMouseOverButton, boo
     g.setColour (juce::Colour (0xaa000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 2.0f), 5.0f);
 
-    juce::ColourGradient bezel (juce::Colour (0xff738078), bounds.getTopLeft(),
-                                juce::Colour (0xff111817), bounds.getBottomLeft(), false);
+    juce::ColourGradient bezel (juce::Colour (0xff6e7e8a), bounds.getTopLeft(),
+                                juce::Colour (0xff10171e), bounds.getBottomLeft(), false);
     g.setGradientFill (bezel);
     g.fillRoundedRectangle (bounds, 5.0f);
 
     const auto cap = bounds.reduced (2.0f).translated (0.0f, press);
     juce::ColourGradient key (isMouseOverButton ? juce::Colour (0xfffbf8e8) : theme::knobCream,
-                             cap.getTopLeft(), juce::Colour (0xffb9c1b4), cap.getBottomLeft(), false);
+                             cap.getTopLeft(), juce::Colour (0xffb2bcc4), cap.getBottomLeft(), false);
     g.setGradientFill (key);
     g.fillRoundedRectangle (cap, 3.5f);
     g.setColour (juce::Colour (0x6efffff4));
@@ -201,7 +202,7 @@ void HardwareButton::paintButton (juce::Graphics& g, bool isMouseOverButton, boo
     g.setFont (makeFont (11.0f, true));
     g.setColour (juce::Colour (0x5a000000));
     g.drawText (getButtonText(), cap.translated (0.0f, 0.8f), juce::Justification::centred);
-    g.setColour (juce::Colour (0xff17201e));
+    g.setColour (juce::Colour (0xff151e27));
     g.drawText (getButtonText(), cap, juce::Justification::centred);
 }
 
@@ -320,7 +321,7 @@ void Knob::paint (juce::Graphics& g)
 
     // A deep, asymmetric socket makes the cap read as a physical part resting
     // in a cut-out rather than a flat rotary glyph.
-    juce::ColourGradient wellGradient (juce::Colour (0xff26332f), well.getTopLeft(),
+    juce::ColourGradient wellGradient (juce::Colour (0xff24303b), well.getTopLeft(),
                                        theme::knobWell, well.getBottomRight(), false);
     g.setGradientFill (wellGradient);
     g.fillEllipse (well.translated (0.0f, 2.35f));
@@ -331,7 +332,7 @@ void Knob::paint (juce::Graphics& g)
 
     // The lower ellipse is a visible moulded sidewall; keeping it darker than
     // the face gives the dial a low, reassuringly heavy phenolic cap profile.
-    juce::ColourGradient sideGradient (juce::Colour (0xff58675f), cap.getTopLeft(),
+    juce::ColourGradient sideGradient (juce::Colour (0xff546472), cap.getTopLeft(),
                                        theme::knobSide, cap.getBottomLeft(), false);
     g.setGradientFill (sideGradient);
     g.fillEllipse (cap.translated (0.0f, 3.65f - press * 0.45f));
@@ -560,16 +561,16 @@ void Switch::paint (juce::Graphics& g)
     const auto bezel = b.expanded (2.0f);
     g.setColour (juce::Colour (0x9a000000));
     g.fillRoundedRectangle (bezel.translated (0.0f, 1.5f), 6.0f);
-    juce::ColourGradient bezelGrad (juce::Colour (0xff6e7d74), bezel.getTopLeft(),
-                                    juce::Colour (0xff101716), bezel.getBottomLeft(), false);
+    juce::ColourGradient bezelGrad (juce::Colour (0xff6a7a88), bezel.getTopLeft(),
+                                    juce::Colour (0xff0f151d), bezel.getBottomLeft(), false);
     g.setGradientFill (bezelGrad);
     g.fillRoundedRectangle (bezel, 6.0f);
     g.setColour (juce::Colour (0xff060a0a));
     g.fillRoundedRectangle (b, 4.0f);
 
     const auto rocker = b.reduced (1.4f);
-    juce::ColourGradient segGrad (juce::Colour (0xff65c7aa), rocker.getTopLeft(),
-                                  juce::Colour (0xff246b59), rocker.getBottomLeft(), false);
+    juce::ColourGradient segGrad (juce::Colour (0xff5fc2e2), rocker.getTopLeft(),
+                                  juce::Colour (0xff22688c), rocker.getBottomLeft(), false);
     g.setGradientFill (segGrad);
     g.fillRoundedRectangle (rocker, 3.2f);
     g.setColour (juce::Colour (0x5cffffff));
@@ -697,17 +698,17 @@ void Toggle::paint (juce::Graphics& g)
     const auto bezel = track.expanded (2.3f);
     g.setColour (juce::Colour (0x98000000));
     g.fillRoundedRectangle (bezel.translated (0.0f, 1.6f), 7.0f);
-    juce::ColourGradient bezelGrad (juce::Colour (0xff6f7d74), bezel.getTopLeft(),
-                                    juce::Colour (0xff101716), bezel.getBottomLeft(), false);
+    juce::ColourGradient bezelGrad (juce::Colour (0xff6a7a88), bezel.getTopLeft(),
+                                    juce::Colour (0xff0f151d), bezel.getBottomLeft(), false);
     g.setGradientFill (bezelGrad);
     g.fillRoundedRectangle (bezel, 7.0f);
     g.setColour (juce::Colour (0xff050909));
     g.fillRoundedRectangle (track, trackH * 0.5f);
 
     const auto slot = track.reduced (1.7f, 2.15f);
-    juce::ColourGradient slotGrad (on ? juce::Colour (0xff2e7865) : juce::Colour (0xff2a302e),
+    juce::ColourGradient slotGrad (on ? juce::Colour (0xff2b749c) : juce::Colour (0xff28313a),
                                    slot.getTopLeft(),
-                                   on ? juce::Colour (0xff0c2d25) : juce::Colour (0xff0b1010),
+                                   on ? juce::Colour (0xff0b2c40) : juce::Colour (0xff0a0f14),
                                    slot.getBottomLeft(), false);
     g.setGradientFill (slotGrad);
     g.fillRoundedRectangle (slot, slot.getHeight() * 0.5f);
@@ -720,7 +721,7 @@ void Toggle::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0x9e000000));
     g.fillEllipse (thumb.translated (0.0f, 1.15f));
     juce::ColourGradient thumbGrad (theme::knobCream, thumb.getTopLeft(),
-                                    juce::Colour (0xff949c92), thumb.getBottomRight(), false);
+                                    juce::Colour (0xff8f99a2), thumb.getBottomRight(), false);
     g.setGradientFill (thumbGrad);
     g.fillEllipse (thumb);
     g.setColour (juce::Colour (0x72ffffff));
@@ -763,8 +764,8 @@ namespace
         const auto bezel = track.expanded (2.3f, 3.0f);
         g.setColour (juce::Colour (0x98000000));
         g.fillRoundedRectangle (bezel.translated (0.0f, 1.6f), 7.0f);
-        juce::ColourGradient bezelGrad (juce::Colour (0xff6f7d74), bezel.getTopLeft(),
-                                        juce::Colour (0xff101716), bezel.getBottomRight(), false);
+        juce::ColourGradient bezelGrad (juce::Colour (0xff6a7a88), bezel.getTopLeft(),
+                                        juce::Colour (0xff0f151d), bezel.getBottomRight(), false);
         g.setGradientFill (bezelGrad);
         g.fillRoundedRectangle (bezel, 7.0f);
 
@@ -772,8 +773,8 @@ namespace
         g.fillRoundedRectangle (track, track.getWidth() * 0.5f);
 
         const auto slot = track.reduced (2.15f, 1.7f);
-        juce::ColourGradient slotGrad (juce::Colour (0xff2a302e), slot.getTopLeft(),
-                                       juce::Colour (0xff0b1010), slot.getBottomLeft(), false);
+        juce::ColourGradient slotGrad (juce::Colour (0xff28313a), slot.getTopLeft(),
+                                       juce::Colour (0xff0a0f14), slot.getBottomLeft(), false);
         g.setGradientFill (slotGrad);
         g.fillRoundedRectangle (slot, slot.getWidth() * 0.5f);
         g.setColour (juce::Colour (0x55ffffff));
@@ -793,7 +794,7 @@ namespace
         g.setColour (juce::Colour (0x9e000000));
         g.fillEllipse (thumb.translated (0.0f, 1.15f));
         juce::ColourGradient thumbGrad (theme::knobCream, thumb.getTopLeft(),
-                                        juce::Colour (0xff949c92), thumb.getBottomRight(), false);
+                                        juce::Colour (0xff8f99a2), thumb.getBottomRight(), false);
         g.setGradientFill (thumbGrad);
         g.fillEllipse (thumb);
         g.setColour (juce::Colour (0x72ffffff));
@@ -987,8 +988,8 @@ void Stepper::paint (juce::Graphics& g)
     const auto bezel = digits.expanded (2.6f, 2.2f);
     g.setColour (juce::Colour (0xaa000000));
     g.fillRoundedRectangle (bezel.translated (0.0f, 1.5f), 4.8f);
-    juce::ColourGradient bezelGrad (juce::Colour (0xff6f7d74), bezel.getTopLeft(),
-                                    juce::Colour (0xff101716), bezel.getBottomLeft(), false);
+    juce::ColourGradient bezelGrad (juce::Colour (0xff6a7a88), bezel.getTopLeft(),
+                                    juce::Colour (0xff0f151d), bezel.getBottomLeft(), false);
     g.setGradientFill (bezelGrad);
     g.fillRoundedRectangle (bezel, 4.8f);
 
@@ -1059,7 +1060,7 @@ void PeakMeter::paint (juce::Graphics& g)
     const auto well = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (juce::Colour (0xa8000000));
     g.fillRoundedRectangle (well.translated (0.0f, 1.1f), 4.0f);
-    juce::ColourGradient bezel (juce::Colour (0xff46514b), well.getTopLeft(),
+    juce::ColourGradient bezel (juce::Colour (0xff424e59), well.getTopLeft(),
                                 juce::Colour (0xff070b0b), well.getBottomLeft(), false);
     g.setGradientFill (bezel);
     g.fillRoundedRectangle (well, 4.0f);
@@ -1112,7 +1113,7 @@ void GainReductionMeter::paint (juce::Graphics& g)
     const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (juce::Colour (0xa8000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 1.0f), 3.8f);
-    juce::ColourGradient bezel (juce::Colour (0xff455049), bounds.getTopLeft(),
+    juce::ColourGradient bezel (juce::Colour (0xff414d58), bounds.getTopLeft(),
                                 juce::Colour (0xff070b0b), bounds.getBottomLeft(), false);
     g.setGradientFill (bezel);
     g.fillRoundedRectangle (bounds, 3.8f);
@@ -1224,11 +1225,11 @@ void Keyboard::setNoteOn (int note, bool on)
 void Keyboard::paint (juce::Graphics& g)
 {
     const auto bed = getLocalBounds().toFloat();
-    g.fillAll (juce::Colour (0xff080d0d));
+    g.fillAll (juce::Colour (0xff070c11));
     g.setColour (juce::Colour (0xae000000));
     g.fillRoundedRectangle (bed.reduced (0.5f).translated (0.0f, 2.0f), 5.0f);
-    juce::ColourGradient rail (juce::Colour (0xff465049), bed.getTopLeft(),
-                               juce::Colour (0xff080c0c), bed.getBottomLeft(), false);
+    juce::ColourGradient rail (juce::Colour (0xff424e58), bed.getTopLeft(),
+                               juce::Colour (0xff070b10), bed.getBottomLeft(), false);
     g.setGradientFill (rail);
     g.fillRoundedRectangle (bed.reduced (0.5f), 5.0f);
     g.setColour (juce::Colour (0x55ffffff));
@@ -1236,7 +1237,7 @@ void Keyboard::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0x64000000));
     g.fillRoundedRectangle (bed.reduced (2.0f).withHeight (4.0f).translated (0.0f, 1.0f), 1.6f);
     const auto keyBed = bed.reduced (3.0f, 3.0f);
-    g.setColour (juce::Colour (0xff111716));
+    g.setColour (juce::Colour (0xff10161d));
     g.fillRoundedRectangle (keyBed, 3.0f);
 
     for (const auto& k : keys_)
@@ -1248,8 +1249,8 @@ void Keyboard::paint (juce::Graphics& g)
             const bool lit = lit_[k.note];
             g.setColour (juce::Colour (0x94000000));
             g.fillRoundedRectangle (r.translated (0.0f, 2.4f), 2.4f);
-            juce::Colour top = lit ? juce::Colour (0xffcce5d9) : theme::knobCream;
-            juce::Colour bot = lit ? juce::Colour (0xff56917f) : juce::Colour (0xff9ca39a);
+            juce::Colour top = lit ? juce::Colour (0xffc9e6f2) : theme::knobCream;
+            juce::Colour bot = lit ? juce::Colour (0xff4f8fae) : juce::Colour (0xff97a1aa);
             g.setGradientFill (juce::ColourGradient (top, r.getTopLeft(), bot, r.getBottomLeft(), false));
             g.fillRoundedRectangle (r, 2.0f);
             g.setColour (juce::Colour (0x82ffffff));
@@ -1280,8 +1281,8 @@ void Keyboard::paint (juce::Graphics& g)
             const bool lit = lit_[k.note];
             g.setColour (juce::Colour (0xb6000000));
             g.fillRoundedRectangle (r.translated (0.0f, 2.4f), 2.4f);
-            juce::Colour top = lit ? juce::Colour (0xff3f8f7c) : juce::Colour (0xff424b46);
-            juce::Colour bot = lit ? juce::Colour (0xff0d332a) : juce::Colour (0xff050808);
+            juce::Colour top = lit ? juce::Colour (0xff3b87b0) : juce::Colour (0xff3e4954);
+            juce::Colour bot = lit ? juce::Colour (0xff0c3148) : juce::Colour (0xff050808);
             g.setGradientFill (juce::ColourGradient (top, r.getTopLeft(), bot, r.getBottomLeft(), false));
             g.fillRoundedRectangle (r, 2.4f);
             g.setColour (juce::Colour (0x52ffffff));
@@ -1334,7 +1335,7 @@ BankBrowser::BankBrowser()
     bankCombo_.setColour (juce::PopupMenu::backgroundColourId, theme::body2);
     bankCombo_.setColour (juce::PopupMenu::textColourId, theme::knobCream);
     bankCombo_.setColour (juce::PopupMenu::highlightedBackgroundColourId, theme::mintDeep);
-    bankCombo_.setColour (juce::PopupMenu::highlightedTextColourId, juce::Colour (0xff06231b));
+    bankCombo_.setColour (juce::PopupMenu::highlightedTextColourId, juce::Colour (0xff062330));
     bankCombo_.setJustificationType (juce::Justification::centred);
     bankCombo_.setTextWhenNothingSelected ("BANK");
     bankCombo_.setTextWhenNoChoicesAvailable ("NO BANKS");
@@ -1458,14 +1459,14 @@ void BankBrowser::paintListBoxItem (int rowNumber, juce::Graphics& g, int width,
 
     if (rowIsSelected)
     {
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xff346f5e), r.getTopLeft(),
-                                                 juce::Colour (0xff12372e), r.getBottomLeft(), false));
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xff31688e), r.getTopLeft(),
+                                                 juce::Colour (0xff11364a), r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, 3.0f);
         g.setColour (juce::Colour (0xffeff1e4));
     }
     else
     {
-        g.setColour ((rowNumber % 2) ? juce::Colour (0xff111817) : juce::Colour (0xff0b1110));
+        g.setColour ((rowNumber % 2) ? juce::Colour (0xff10171e) : juce::Colour (0xff0a1015));
         g.fillRoundedRectangle (r, 3.0f);
         g.setColour (theme::ink);
     }
@@ -1492,8 +1493,8 @@ void BankBrowser::paint (juce::Graphics& g)
     const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (juce::Colour (0xa5000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 2.0f), 7.5f);
-    juce::ColourGradient bezel (juce::Colour (0xff515c54), bounds.getTopLeft(),
-                                juce::Colour (0xff070c0c), bounds.getBottomLeft(), false);
+    juce::ColourGradient bezel (juce::Colour (0xff4d5863), bounds.getTopLeft(),
+                                juce::Colour (0xff060b10), bounds.getBottomLeft(), false);
     g.setGradientFill (bezel);
     g.fillRoundedRectangle (bounds, 7.5f);
     const auto screen = bounds.reduced (3.0f);
@@ -1584,8 +1585,8 @@ void EnvelopeGraph::paint (juce::Graphics& g)
     const auto bezel = area.expanded (2.0f);
     g.setColour (juce::Colour (0x96000000));
     g.fillRoundedRectangle (bezel.translated (0.0f, 1.4f), 6.0f);
-    juce::ColourGradient bezelGrad (juce::Colour (0xff455049), bezel.getTopLeft(),
-                                    juce::Colour (0xff070c0c), bezel.getBottomLeft(), false);
+    juce::ColourGradient bezelGrad (juce::Colour (0xff414d58), bezel.getTopLeft(),
+                                    juce::Colour (0xff060b10), bezel.getBottomLeft(), false);
     g.setGradientFill (bezelGrad);
     g.fillRoundedRectangle (bezel, 6.0f);
     juce::ColourGradient screenGrad (theme::displayFg, area.getTopLeft(),
@@ -1625,7 +1626,7 @@ void EnvelopeGraph::paint (juce::Graphics& g)
         g.fillEllipse (p.x - 5.0f, p.y - 4.0f, 10.0f, 10.0f);
         juce::ColourGradient pointGrad (i == activeStage_ ? theme::hot : theme::knobCream,
                                         p.translated (-4.0f, -4.0f),
-                                        i == activeStage_ ? theme::hotDeep : juce::Colour (0xff9da39a),
+                                        i == activeStage_ ? theme::hotDeep : juce::Colour (0xff98a2ab),
                                         p.translated (4.0f, 4.0f), false);
         g.setGradientFill (pointGrad);
         g.fillEllipse (p.x - 4.5f, p.y - 5.0f, 9.0f, 9.0f);
@@ -1688,7 +1689,9 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
       envBox_ ("ENVELOPE"),
       fxBox_ ("FX")
 {
-    addAndMakeVisible (brandTitle_);
+    // The script engraving painted in RomplerEditor::paint is the visible
+    // brand; this label stays in the tree for accessibility only.
+    addChildComponent (brandTitle_);
     brandTitle_.setText ("Aoi YUME", juce::dontSendNotification);
     brandTitle_.setJustificationType (juce::Justification::centredLeft);
     brandTitle_.setColour (juce::Label::textColourId, theme::knobCream);
@@ -1703,6 +1706,12 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     brandSub_.setColour (juce::Label::textColourId, theme::mintGlow.withAlpha (0.92f));
     brandSub_.setFont (juce::Font (juce::FontOptions ("Snell Roundhand", 21.0f, juce::Font::italic)
                                        .withKerningFactor (0.02f)));
+
+    addAndMakeVisible (brandSub2_);
+    brandSub2_.setText ("SAMPLE ROMPLER", juce::dontSendNotification);
+    brandSub2_.setJustificationType (juce::Justification::centredLeft);
+    brandSub2_.setColour (juce::Label::textColourId, theme::inkSoft);
+    brandSub2_.setFont (makeDisplayFont (11.0f, true));
 
     addAndMakeVisible (presetName_);
     presetName_.setJustificationType (juce::Justification::centredLeft);
@@ -1899,10 +1908,42 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     addAndMakeVisible (*pitchWheel_);
     addAndMakeVisible (*modWheel_);
 
-    // Landscape synth-deck layout: the preset browser stays visible beside
-    // the primary voice controls, while the performance keyboard anchors the
-    // bottom edge.
-    setSize (1120, 900);
+    // The approved product render is the default faceplate.  The transparent
+    // JUCE controls remain mounted above it as real parameter hit targets.
+    skinImage_ = juce::ImageFileFormat::loadFrom (
+        BinaryData::AoiYumeBlueDream_png,
+        BinaryData::AoiYumeBlueDream_pngSize);
+    skinMode_ = ! skinImage_.isNull();
+    if (skinMode_)
+    {
+        // The embedded render owns all visible pixels.  Keep the existing
+        // controls alive for interaction and accessibility, but suppress
+        // their duplicate paint passes.
+        std::array<juce::Component*, 17> overlays {
+            &brandTitle_, &brandSub_, &brandSub2_, &presetName_,
+            &presetDirtyIndicator_, &voiceBox_, &busBox_, &compBox_,
+            &envBox_, &fxBox_, &compPathLabel_, &gainReductionMeter_,
+            &sfLabel_, &sfDisplay_, &bankDigits_, &loadButton_, &peakMeter_
+        };
+        for (auto* component : overlays)
+            component->setAlpha (0.0f);
+        presetButton_.setAlpha (0.0f);
+        keyboard_.setAlpha (0.0f);
+        if (bankBrowser_)
+            bankBrowser_->setAlpha (0.0f);
+        if (pitchWheel_)
+            pitchWheel_->setAlpha (0.0f);
+        if (modWheel_)
+            modWheel_->setAlpha (0.0f);
+        for (auto& control : controls_)
+            if (control)
+                control->setAlpha (0.0f);
+        if (envGraph_)
+            envGraph_->setAlpha (0.0f);
+    }
+
+    setSize (skinMode_ ? skinImage_.getWidth() : 1120,
+             skinMode_ ? skinImage_.getHeight() : 900);
 
     startTimerHz (20);
     activePreset_ = processor_.capturePreset();
@@ -1966,7 +2007,9 @@ void RomplerEditor::loadPresetUuid (const juce::String& uuid)
     if (entry == nullptr)
         return;
 
-    if (processor_.applyPreset (entry->document) != RomplerProcessor::ApplyStatus::ok)
+    const auto resolved = presetLibrary_.resolveSoundFont (entry->document);
+    if (resolved.status == SoundFontResolver::Status::missing
+        || processor_.applyPreset (entry->document, resolved.file) != RomplerProcessor::ApplyStatus::ok)
         return;
 
     setPresetHeaderDocument (entry->document);
@@ -2003,6 +2046,13 @@ void RomplerEditor::handlePresetDirtyChoice (const juce::String& uuid,
 
 void RomplerEditor::paint (juce::Graphics& g)
 {
+    if (skinMode_ && ! skinImage_.isNull())
+    {
+        g.drawImage (skinImage_, getLocalBounds().toFloat(),
+                     juce::RectanglePlacement::stretchToFit);
+        return;
+    }
+
     // Main moulded chassis: three depth planes make the editor read as an
     // instrument faceplate, while keeping components and signal behaviour
     // exactly as before.
@@ -2011,16 +2061,16 @@ void RomplerEditor::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xc4000000));
     g.fillRoundedRectangle (chassis.translated (0.0f, 4.0f), 17.0f);
 
-    juce::ColourGradient outerGrad (juce::Colour (0xff8b998e), chassis.getTopLeft(),
-                                    juce::Colour (0xff0c1211), chassis.getBottomLeft(), false);
+    juce::ColourGradient outerGrad (juce::Colour (0xff86939f), chassis.getTopLeft(),
+                                    juce::Colour (0xff0b1116), chassis.getBottomLeft(), false);
     g.setGradientFill (outerGrad);
     g.fillRoundedRectangle (chassis, 17.0f);
     g.setColour (juce::Colour (0x64fffff5));
     g.drawRoundedRectangle (chassis.reduced (0.55f), 16.4f, 1.05f);
 
     const auto face = chassis.reduced (3.0f);
-    juce::ColourGradient bodyGrad (juce::Colour (0xff4a5750), face.getTopLeft(),
-                                   juce::Colour (0xff1b2421), face.getBottomLeft(), false);
+    juce::ColourGradient bodyGrad (juce::Colour (0xff46535f), face.getTopLeft(),
+                                   juce::Colour (0xff181f28), face.getBottomLeft(), false);
     g.setGradientFill (bodyGrad);
     g.fillRoundedRectangle (face, 13.5f);
     g.setColour (juce::Colour (0x3dffffff));
@@ -2043,8 +2093,8 @@ void RomplerEditor::paint (juce::Graphics& g)
     const auto topPanel = face.withHeight (58.0f);
     g.setColour (juce::Colour (0x8e000000));
     g.fillRoundedRectangle (topPanel.translated (0.0f, 1.8f), 10.0f);
-    juce::ColourGradient headerGrad (juce::Colour (0xff59665d), topPanel.getTopLeft(),
-                                     juce::Colour (0xff1b2421), topPanel.getBottomLeft(), false);
+    juce::ColourGradient headerGrad (juce::Colour (0xff55636e), topPanel.getTopLeft(),
+                                     juce::Colour (0xff181f28), topPanel.getBottomLeft(), false);
     g.setGradientFill (headerGrad);
     g.fillRoundedRectangle (topPanel, 10.0f);
     g.setColour (juce::Colour (0x56ffffff));
@@ -2063,6 +2113,20 @@ void RomplerEditor::paint (juce::Graphics& g)
                                     .withTrimmedRight (420.0f)
                                     .withY (topPanel.getY() + 14.0f)
                                     .withHeight (30.0f);
+
+    // Blue Dream signature glow: a cool halo blooms behind the engraving so
+    // the header reads like backlit acrylic.  It is paint-only and sits
+    // beneath the type passes, so all text contrast behaviour is unchanged.
+    {
+        const auto halo = signature.expanded (46.0f, 18.0f);
+        juce::ColourGradient glow (theme::mintGlow.withAlpha (0.20f), halo.getCentre(),
+                                   juce::Colour (0x0017405e), halo.getBottomLeft(), true);
+        g.setGradientFill (glow);
+        g.fillRoundedRectangle (halo, halo.getHeight());
+        g.setColour (theme::mint.withAlpha (0.14f));
+        g.fillRoundedRectangle (signature.expanded (18.0f, 5.0f), 9.0f);
+    }
+
     const auto signatureFont = juce::Font (juce::FontOptions ("Snell Roundhand", 21.0f,
                                                                juce::Font::italic)
                                                .withKerningFactor (0.02f));
@@ -2083,8 +2147,8 @@ void RomplerEditor::paint (juce::Graphics& g)
         const auto outer = bounds.toFloat().expanded (3.0f, 2.5f);
         g.setColour (juce::Colour (0x9e000000));
         g.fillRoundedRectangle (outer.translated (0.0f, 1.3f), 4.2f);
-        juce::ColourGradient rim (juce::Colour (0xff6b7a70), outer.getTopLeft(),
-                                  juce::Colour (0xff0c1412), outer.getBottomLeft(), false);
+        juce::ColourGradient rim (juce::Colour (0xff677787), outer.getTopLeft(),
+                                  juce::Colour (0xff0b131a), outer.getBottomLeft(), false);
         g.setGradientFill (rim);
         g.fillRoundedRectangle (outer, 4.2f);
         g.setColour (theme::displayOn.withAlpha (0.34f));
@@ -2109,34 +2173,46 @@ void RomplerEditor::resized()
     const auto brandColumn = top.removeFromLeft (220);
     brandTitle_.setBounds (brandColumn.withTop (top.getY() + 1).withHeight (30));
     brandSub_.setBounds (brandColumn.withTop (top.getY() + 29).withHeight (25));
+    // The subtitle sits directly beneath the painted script signature, as in
+    // the mockup's stacked brand block.
+    brandSub2_.setBounds (top.getX() + 240, top.getY() + 40, 200, 14);
     presetName_.setBounds (brandColumn.withTop (top.getY() + 32).withHeight (20).withTrimmedRight (24));
     presetDirtyIndicator_.setBounds (brandColumn.getRight() - 24, top.getY() + 32, 24, 20);
     auto presetButtonArea = top.removeFromRight (100);
     presetButton_.setBounds (presetButtonArea.withY (top.getY() + 14).withHeight (30));
-    // The browser is intentionally the first-class element: selecting a
-    // patch and seeing its bank/program is the main entry point of a rompler.
-    constexpr int browserWidth = 318;
-    constexpr int topHeight = 210;
-    auto topRow = b.removeFromTop (topHeight);
-    auto browser = topRow.removeFromLeft (browserWidth);
-    bankBrowser_->setBounds (browser);
-    topRow.removeFromLeft (12);
-    voiceBox_.setBounds (topRow);
-    layoutVoiceControls (voiceBox_.getBounds().reduced (10, 12).withTop (voiceBox_.getY() + 24));
+    // Blue Dream deck, read top-down like the mockup: the preset rail owns
+    // the left edge across the VOICE and module rows, VOICE sits beside it,
+    // then BUS -> COMP -> ENV, then a full-width FX rail.  The dock and the
+    // keybed close the panel bottom edge.
+    constexpr int browserWidth = 250;
+    constexpr int voiceHeight = 226;
+    constexpr int fxHeight = 132;
 
+    auto keybed = b.removeFromBottom (150);
+    b.removeFromBottom (10);
+    auto dock = b.removeFromBottom (48);
+    b.removeFromBottom (10);
+    auto fx = b.removeFromBottom (fxHeight);
+    b.removeFromBottom (10);
+
+    const auto browser = b.removeFromLeft (browserWidth);
+    bankBrowser_->setBounds (browser);
+    b.removeFromLeft (12);
+
+    voiceBox_.setBounds (b.removeFromTop (voiceHeight));
     b.removeFromTop (10);
 
     // The audio path reads left-to-right: BUS -> COMP -> ENVELOPE. The
-    // compressor gets a compact but complete 3 x 2 control matrix.
-    constexpr int busWidth = 345;
-    constexpr int compWidth = 330;
-    constexpr int midHeight = 225;
-    auto midRow = b.removeFromTop (midHeight);
-    busBox_.setBounds (midRow.removeFromLeft (busWidth));
-    midRow.removeFromLeft (10);
-    compBox_.setBounds (midRow.removeFromLeft (compWidth));
-    midRow.removeFromLeft (10);
-    envBox_.setBounds (midRow);
+    // compressor keeps its complete 3 x 2 control matrix.
+    constexpr int busWidth = 280;
+    constexpr int compWidth = 280;
+    busBox_.setBounds (b.removeFromLeft (busWidth));
+    b.removeFromLeft (10);
+    compBox_.setBounds (b.removeFromLeft (compWidth));
+    b.removeFromLeft (10);
+    envBox_.setBounds (b);
+
+    fxBox_.setBounds (fx);
     layoutBusControls (busBox_.getBounds().reduced (10, 12).withTop (busBox_.getY() + 24));
     layoutCompControls (compBox_.getBounds().reduced (10, 12).withTop (compBox_.getY() + 24));
     compPathLabel_.setBounds (compBox_.getX() + 102, compBox_.getY() + 4, 64, 16);
@@ -2144,19 +2220,9 @@ void RomplerEditor::resized()
     auto envArea = envBox_.getBounds().reduced (10, 12).withTop (envBox_.getY() + 24);
     envGraph_->setBounds (envArea.withHeight (76));
     layoutEnvControls (envArea.withY (envArea.getY() + 82).withHeight (envArea.getHeight() - 82));
-
-    b.removeFromTop (10);
-
-    // FX box spans the full width.
-    constexpr int fxHeight = 140;
-    auto fx = b.removeFromTop (fxHeight);
-    fxBox_.setBounds (fx);
     layoutFxControls (fxBox_.getBounds().reduced (10, 12).withTop (fxBox_.getY() + 24));
+    layoutVoiceControls (voiceBox_.getBounds().reduced (10, 12).withTop (voiceBox_.getY() + 24));
 
-    b.removeFromTop (10);
-
-    // Dock.
-    auto dock = b.removeFromTop (48);
     const int dx = dock.getX();
     const int dy = dock.getY();
     const int loadX  = dock.getRight() - 96;
@@ -2171,24 +2237,25 @@ void RomplerEditor::resized()
     b.removeFromTop (8);
 
     // Pitch / mod wheels flank the keyboard's left edge, hardware-style.
-    auto wheelColumn = b.removeFromLeft (100);
+    auto wheelColumn = keybed.removeFromLeft (100);
     const int wheelH = juce::jmin (168, wheelColumn.getHeight());
     const int wheelY = wheelColumn.getY() + (wheelColumn.getHeight() - wheelH) / 2;
     if (pitchWheel_)
         pitchWheel_->setBounds (wheelColumn.removeFromLeft (46).withY (wheelY).withHeight (wheelH));
     if (modWheel_)
         modWheel_->setBounds (wheelColumn.removeFromLeft (46).withY (wheelY).withHeight (wheelH));
-    b.removeFromLeft (8);
+    keybed.removeFromLeft (8);
 
-    keyboard_.setBounds (b);
+    keyboard_.setBounds (keybed);
 }
 
 void RomplerEditor::layoutVoiceControls (juce::Rectangle<int> area)
 {
-    // 4x2 grid: Drive | Vel->Drive | Filter Offset | Legato / Curve | Filter
-    // Route | Polyphony | (empty).
+    // Mockup VOICE module: three large knobs across the top with
+    // performance switches at the right edge, then curve/route switches
+    // beneath the knobs.
     const auto rows = 2;
-    const auto cols = 4;
+    const auto cols = 5;
     const auto cellW = area.getWidth() / cols;
     const auto cellH = area.getHeight() / rows;
 
@@ -2201,10 +2268,10 @@ void RomplerEditor::layoutVoiceControls (juce::Rectangle<int> area)
     place (0, 0, 0);   // Drive
     place (2, 0, 1);   // Vel -> Drive
     place (4, 0, 2);   // Filter Offset
-    place (31, 0, 3);  // Legato
+    place (5, 0, 3);   // Polyphony
+    place (31, 0, 4);  // Legato
     place (1, 1, 0);   // Curve
     place (3, 1, 1);   // Filter Route
-    place (5, 1, 2);   // Polyphony
 }
 
 void RomplerEditor::layoutBusControls (juce::Rectangle<int> area)

@@ -21,22 +21,22 @@ namespace aod
 namespace theme
 {
     // Primary chassis and panel surfaces
-    inline juce::Colour body         { 0xff1b2422 };
-    inline juce::Colour body2        { 0xff37423e };
-    inline juce::Colour bodyEdge     { 0xff8e9a8e };
+    inline juce::Colour body         { 0xff171e26 };
+    inline juce::Colour body2        { 0xff333f4a };
+    inline juce::Colour bodyEdge     { 0xff88929e };
 
     // Control panels - warm graphite / anodised aluminium
-    inline juce::Colour panel        { 0xff3a4742 };
-    inline juce::Colour panelEdge    { 0xff748178 };
+    inline juce::Colour panel        { 0xff35414d };
+    inline juce::Colour panelEdge    { 0xff6f7d8a };
 
     // Text - slightly warm paint rather than a blue-white UI font
     inline juce::Colour ink          { 0xfffbf8e9 };
-    inline juce::Colour inkSoft      { 0xffd0d8ca };
+    inline juce::Colour inkSoft      { 0xffcdd6da };
 
     // Seafoam accents - reserved for interaction and signal flow
-    inline juce::Colour mint         { 0xff69d6b4 };
-    inline juce::Colour mintDeep     { 0xff2f977e };
-    inline juce::Colour mintGlow     { 0xffbcf1d6 };
+    inline juce::Colour mint         { 0xff5ad2e6 };
+    inline juce::Colour mintDeep     { 0xff1f7fa8 };
+    inline juce::Colour mintGlow     { 0xffc9ecf6 };
 
     // Hot / drive controls - amber for emphasis
     inline juce::Colour hot          { 0xfff2b25c };
@@ -45,24 +45,24 @@ namespace theme
     // Knob materials. The bright cream remains useful for legends and keys;
     // the rotary caps themselves use a low-sheen graphite stack below.
     inline juce::Colour knobCream    { 0xfff7f4e3 };
-    inline juce::Colour knobShadow   { 0xffabb2a6 };
+    inline juce::Colour knobShadow   { 0xffa4adb4 };
     inline juce::Colour knobWell     { 0xff070b0b };
-    inline juce::Colour knobSide     { 0xff1b2622 };
-    inline juce::Colour knobCap      { 0xff26312d };
-    inline juce::Colour knobCapHi    { 0xff718279 };
-    inline juce::Colour knobRim      { 0xffa0afa4 };
+    inline juce::Colour knobSide     { 0xff182129 };
+    inline juce::Colour knobCap      { 0xff232e38 };
+    inline juce::Colour knobCapHi    { 0xff6c7c88 };
+    inline juce::Colour knobRim      { 0xff9aa6b0 };
     inline juce::Colour knobPointer  { 0xfffffdf1 };
 
     // LED palette - signal-meter colors
     inline juce::Colour ledRed       { 0xfff16d58 };
     inline juce::Colour ledHot       { 0xffffc06a };
-    inline juce::Colour ledMint      { 0xff72dfbc };
-    inline juce::Colour ledOff       { 0xff121918 };
+    inline juce::Colour ledMint      { 0xff6cd4ee };
+    inline juce::Colour ledOff       { 0xff101722 };
 
     // Display area - near-black LCD window
-    inline juce::Colour displayBg    { 0xff071716 };
-    inline juce::Colour displayFg    { 0xff1d4038 };
-    inline juce::Colour displayOn    { 0xff9be9ce };
+    inline juce::Colour displayBg    { 0xff071320 };
+    inline juce::Colour displayFg    { 0xff1d3c50 };
+    inline juce::Colour displayOn    { 0xff9adff2 };
 }
 
 // Build the panel typography from installed workstation-style faces rather
@@ -548,6 +548,7 @@ private:
 
     DepthLabel brandTitle_;
     DepthLabel brandSub_;
+    DepthLabel brandSub2_;
     DepthLabel presetName_;
     DepthLabel presetDirtyIndicator_;
 
@@ -583,6 +584,12 @@ private:
     std::unique_ptr<PresetBrowserOverlay> presetOverlay_;
     HardwareButton presetButton_ { "PRESETS" };
     Keyboard keyboard_;
+
+    // The approved Blue Dream product render is embedded in the plugin and
+    // used as the exact faceplate surface.  Child controls remain alive as
+    // transparent hit targets so parameter/MIDI behaviour is preserved.
+    juce::Image skinImage_;
+    bool skinMode_ = false;
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
     PresetDocument activePreset_;

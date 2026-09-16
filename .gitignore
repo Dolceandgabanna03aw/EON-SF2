@@ -29,3 +29,11 @@ outputs/Icon?
 # rejects the bundle as carrying "detritus" and the build fails.
 Icon?
 .worktrees/
+
+# Codex session state + packaged build artifacts (not source)
+.continuity/
+.superpowers/
+dist/
+
+# Offscreen mockup analysis crops (scratch; analysis scripts stay tracked)
+outputs/_crops/
