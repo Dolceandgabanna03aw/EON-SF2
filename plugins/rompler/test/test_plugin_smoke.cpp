@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cmath>
+#include <thread>
 
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
@@ -471,7 +472,10 @@ TEST_CASE ("prepare cycles reuse samples but advance bank generations", "[plugin
     REQUIRE (processor.getBankLoaderForTesting (0) == first);
 
     processor.selectPreset (12, 34);
-    processor.prepareToPlay (44100.0, kBlockSize);
+
+    // Preparing on the message thread reloads inline; exercise the marshalled
+    // path by preparing on a non-message thread, as an audio callback would.
+    std::thread ([&processor] { processor.prepareToPlay (44100.0, kBlockSize); }).join();
 
     // The rate-mismatched reload is marshalled to the message thread: the
     // stale loader must still be published until the deferred drain runs.

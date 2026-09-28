@@ -54,7 +54,20 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
     // converges every slot to the most recently requested rate; a
     // block-size-only change reloads nothing.
     pendingBankReloadRate_.store (static_cast<int> (sampleRate), std::memory_order_release);
-    queueAsyncFlag (reloadBanksForRate | offerBundledFont);
+    if (auto* manager = juce::MessageManager::getInstanceWithoutCreating();
+        manager == nullptr || manager->isThisTheMessageThread())
+    {
+        // Either this is already the message thread (where loadSoundFont()
+        // is legal anyway) or no pumpable message loop exists at all —
+        // offline renderers and headless hosts would leave a deferred flag
+        // set forever, so run the bank work inline here.
+        reloadBanksForPreparedRate();
+        loadBundledSoundFont();
+    }
+    else
+    {
+        queueAsyncFlag (reloadBanksForRate | offerBundledFont);
+    }
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     dynamicsProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
