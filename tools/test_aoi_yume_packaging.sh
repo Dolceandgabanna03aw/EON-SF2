@@ -19,7 +19,18 @@ for pair in \
     "Standalone/Aoi YUME.app"; do
     bundle="$build_root/$pair"
     mkdir -p "$bundle/Contents/Resources/SoundFonts"
-    printf 'Aoi YUME\nEON LAB\n' > "$bundle/Contents/Info.plist"
+    cat > "$bundle/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Aoi YUME</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.eonlab.aoi-yume</string>
+</dict>
+</plist>
+PLIST
     : > "$bundle/Contents/Resources/SoundFonts/Crystal Legacy.sf2"
     : > "$bundle/Contents/Resources/SoundFonts/Natural Stage.sf2"
     : > "$bundle/Contents/Resources/SoundFonts/Studio Essentials.sf2"
@@ -37,6 +48,22 @@ listing="$(unzip -Z1 "$archive")"
 [[ "$listing" != *'Sonic_Mania'* ]]
 [[ "$listing" != *'Live HQ Natural'* ]]
 [[ "$listing" != *'SGM-v2.01'* ]]
+
+if command -v pkgbuild >/dev/null 2>&1 && command -v pkgutil >/dev/null 2>&1; then
+    pkg="$dist_root/Aoi-YUME-macOS.pkg"
+    BUILD_ROOT="$build_root" DIST_ROOT="$dist_root" PKG_PATH="$pkg" \
+        PKG_VERSION=0.1.0 SKIP_SIGNATURE=1 "$repo_root/tools/package_aoi_yume_pkg_macos.sh"
+
+    payload="$(pkgutil --payload-files "$pkg")"
+    [[ "$payload" == *'Library/Audio/Plug-Ins/VST3/Aoi YUME.vst3/Contents/Resources/SoundFonts/Crystal Legacy.sf2'* ]]
+    [[ "$payload" == *'Library/Audio/Plug-Ins/Components/Aoi YUME.component/Contents/Resources/SoundFonts/Natural Stage.sf2'* ]]
+    [[ "$payload" == *'Applications/Aoi YUME.app/Contents/Resources/SoundFonts/Studio Essentials.sf2'* ]]
+    [[ "$payload" != *'Sonic_Mania'* ]]
+    [[ "$payload" != *'Live HQ Natural'* ]]
+    [[ "$payload" != *'SGM-v2.01'* ]]
+else
+    echo "pkgbuild/pkgutil unavailable; pkg fixture skipped"
+fi
 
 install_root="$fixture_root/install"
 backup_root="$fixture_root/backups"

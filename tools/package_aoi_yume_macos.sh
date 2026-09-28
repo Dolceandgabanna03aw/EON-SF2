@@ -32,15 +32,17 @@ require_identity() {
     local bundle="$1"
     local plist="$bundle/Contents/Info.plist"
     [[ -f "$plist" ]] || { print -u2 "Missing Info.plist: $plist"; return 1; }
+    if ! plutil -lint "$plist" >/dev/null 2>&1; then
+        print -u2 "Invalid Info.plist: $plist"
+        return 1
+    fi
     local metadata
-    if plutil -lint "$plist" >/dev/null 2>&1; then
-        metadata="$(plutil -p "$plist")"
-        [[ "$metadata" == *'"CFBundleName" => "Aoi YUME"'* ]] || { print -u2 "Unexpected product name in $plist"; return 1; }
-        [[ "$metadata" == *'"CFBundleIdentifier" => "com.eonlab.aoi-yume"'* ]] || { print -u2 "Unexpected bundle ID in $plist"; return 1; }
-        if [[ "$metadata" == *'"AudioComponents"'* ]]; then
-            [[ "$metadata" == *'"manufacturer" => "EonL"'* ]] || { print -u2 "Unexpected AU manufacturer in $plist"; return 1; }
-            [[ "$metadata" == *'"subtype" => "AoYu"'* ]] || { print -u2 "Unexpected AU subtype in $plist"; return 1; }
-        fi
+    metadata="$(plutil -p "$plist")"
+    [[ "$metadata" == *'"CFBundleName" => "Aoi YUME"'* ]] || { print -u2 "Unexpected product name in $plist"; return 1; }
+    [[ "$metadata" == *'"CFBundleIdentifier" => "com.eonlab.aoi-yume"'* ]] || { print -u2 "Unexpected bundle ID in $plist"; return 1; }
+    if [[ "$metadata" == *'"AudioComponents"'* ]]; then
+        [[ "$metadata" == *'"manufacturer" => "EonL"'* ]] || { print -u2 "Unexpected AU manufacturer in $plist"; return 1; }
+        [[ "$metadata" == *'"subtype" => "AoYu"'* ]] || { print -u2 "Unexpected AU subtype in $plist"; return 1; }
     fi
 }
 
