@@ -37,3 +37,6 @@ dist/
 
 # Offscreen mockup analysis crops (scratch; analysis scripts stay tracked)
 outputs/_crops/
+
+# Editor-local tooling state
+.vscode/
