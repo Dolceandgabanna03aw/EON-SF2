@@ -73,6 +73,11 @@ public:
     }
     /** Test-only: synchronously drain the message-thread timer mailbox. */
     void drainDeferredWorkForTesting() { timerCallback(); }
+    /** Test-only: voices currently rendering inside the pool. */
+    [[nodiscard]] int getActiveVoiceCountForTesting() const noexcept
+    {
+        return voicePool_ ? voicePool_->activeVoiceCount() : 0;
+    }
     /**
         Test-only seam for interleaving a new MIDI CC after timerCallback()
         snapshots a controller mailbox but before it touches APVTS.

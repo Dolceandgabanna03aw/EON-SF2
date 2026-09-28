@@ -104,6 +104,10 @@ private:
     bool active_ = false;
     juce::SmoothedValue<float> driveDbSmooth_;
     bool driveNeedsReset_ = true;
+    std::uint32_t steadyDriveDbBits_ = 0;
+    float steadyDriveBlend_ = 0.0f;
+    float steadyDriveGain_ = 1.0f;
+    bool steadyDriveCacheValid_ = false;
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
     float envelopeLevel_ = 0.0f;
@@ -144,6 +148,9 @@ private:
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
     int filterSampleRate_ = 0;
+    const Sample* filterParameterSample_ = nullptr;
+    std::uint32_t filterParameterOffsetBits_ = 0;
+    bool filterParametersCached_ = false;
 
     void bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept;
     void detachSample() noexcept;

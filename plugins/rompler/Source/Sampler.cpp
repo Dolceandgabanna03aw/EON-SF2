@@ -145,7 +145,8 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         return;
     }
 
-    if (filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate)
+    const bool filterNeedsPrepare = filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate;
+    if (filterNeedsPrepare)
     {
         filter_.prepare (static_cast<double> (hostSampleRate));
         filterSampleRate_ = hostSampleRate;
@@ -155,6 +156,25 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // mid-Release every block would restart the ramp from the current
         // level, stretching what should be a fixed-time fade indefinitely.
         adsr_.prepare (static_cast<double> (hostSampleRate));
+    }
+
+    std::uint32_t filterOffsetBits = 0;
+    static_assert (sizeof (filterOffsetBits) == sizeof (filterOffsetCents),
+                   "expected 32-bit float");
+    std::memcpy (&filterOffsetBits, &filterOffsetCents, sizeof (filterOffsetBits));
+    const bool filterParametersChanged = filterNeedsPrepare || ! filterParametersCached_
+        || filterParameterSample_ != sample_
+        || filterParameterOffsetBits_ != filterOffsetBits;
+    if (filterParametersChanged)
+    {
+        const float cutoffHz = std::clamp (
+            sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
+            20.0f, static_cast<float> (hostSampleRate) * 0.49f);
+        const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
+        filter_.setCutoff (cutoffHz, q);
+        filterParameterSample_ = sample_;
+        filterParameterOffsetBits_ = filterOffsetBits;
+        filterParametersCached_ = true;
     }
 
     // Push ADSR parameters only on change: the setters recompute the current
@@ -178,12 +198,6 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         adsr_.setReleaseSec (releaseMs * 0.001f);
     }
 
-    const float cutoffHz = std::clamp (
-        sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
-        20.0f, static_cast<float> (hostSampleRate) * 0.49f);
-    const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
-    filter_.setCutoff (cutoffHz, q);
-
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
 
@@ -198,6 +212,32 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         driveNeedsReset_ = false;
     }
     driveDbSmooth_.setTargetValue (velDriveDb);
+
+    const bool driveIsSmoothing = driveDbSmooth_.isSmoothing();
+    const float steadyDriveDb = driveDbSmooth_.getCurrentValue();
+    const auto driveBlendForDb = [] (float dbValue) noexcept
+    {
+        const float position = std::clamp (std::abs (dbValue), 0.0f, 1.0f);
+        return position * position * (3.0f - 2.0f * position);
+    };
+    if (! driveIsSmoothing)
+    {
+        std::uint32_t driveDbBits = 0;
+        static_assert (sizeof (driveDbBits) == sizeof (steadyDriveDb),
+                       "expected 32-bit float");
+        std::memcpy (&driveDbBits, &steadyDriveDb, sizeof (driveDbBits));
+        if (! steadyDriveCacheValid_ || steadyDriveDbBits_ != driveDbBits)
+        {
+            steadyDriveDbBits_ = driveDbBits;
+            steadyDriveBlend_ = driveBlendForDb (steadyDriveDb);
+            steadyDriveGain_ = steadyDriveBlend_ > 0.0f
+                ? std::pow (10.0f, steadyDriveDb / 20.0f)
+                : 1.0f;
+            steadyDriveCacheValid_ = true;
+        }
+    }
+    const float steadyDriveBlend = driveIsSmoothing ? 0.0f : steadyDriveBlend_;
+    const float steadyDriveGain = driveIsSmoothing ? 1.0f : steadyDriveGain_;
 
     // Loop points as sample-frame indices into sampleData. While looping, phase_
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
@@ -215,6 +255,11 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     const double fixedRate = playRate_ * std::pow (2.0, static_cast<double> (pitchBendSemitones) / 12.0);
     const float fixedPosition = interpolator.positionForRate (fixedRate);
+    // positionForRate is linear in log2(rate). Vibrato is additive in
+    // semitones, so its table coordinate is an additive offset as well.
+    const double fixedLog2Rate = vibratoDepthCents != 0.0f ? std::log2 (fixedRate) : 0.0;
+    constexpr double rateBracketScale =
+        static_cast<double> (BandLimitedInterpolator::kNumRateBrackets - 1) / 4.0;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -234,12 +279,12 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // resetting the cached rate (which would otherwise jump the read
         // phase).
         double effectiveRate = fixedRate;
+        float vibratoSemitones = 0.0f;
         if (vibratoDepthCents != 0.0f)
         {
-            const float vibratoSemitones =
+            vibratoSemitones =
                 (vibratoDepthCents * static_cast<float> (std::sin (vibratoPhase_))) / 100.0f;
-            effectiveRate = playRate_ * std::pow (2.0,
-                (static_cast<double> (pitchBendSemitones) + static_cast<double> (vibratoSemitones)) / 12.0);
+            effectiveRate = fixedRate * std::exp2 (static_cast<double> (vibratoSemitones) / 12.0);
         }
 
         if (!looping)
@@ -273,7 +318,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // sinc table band-limits the read for the rate actually being played;
         // taps wrap inside an active loop so the seam stays continuous, and
         // clamp at the ends so a one-shot never reads outside its buffer.
-        const float position = vibratoDepthCents != 0.0f ? interpolator.positionForRate (effectiveRate) : fixedPosition;
+        const float position = vibratoDepthCents != 0.0f
+            ? (effectiveRate > 1.0
+                ? static_cast<float> (std::clamp (
+                    (fixedLog2Rate + static_cast<double> (vibratoSemitones) / 12.0) * rateBracketScale,
+                    0.0, static_cast<double> (BandLimitedInterpolator::kNumRateBrackets - 1)))
+                : 0.0f)
+            : fixedPosition;
         // Interior kernels never need edge clamps or loop modulo per tap.
         // Keep the guarded reader for the sample head, tail, and loop seams.
         const auto firstTap = index - BandLimitedInterpolator::kCentreTap;
@@ -313,12 +364,17 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             sample = filter_.process (sample);
 
         // Apply nonlinear drive based on curve ID
-        const float currentDriveDb = driveDbSmooth_.getNextValue();
-        const float driveBlendPosition = std::clamp (std::abs (currentDriveDb), 0.0f, 1.0f);
-        const float driveBlend = driveBlendPosition * driveBlendPosition * (3.0f - 2.0f * driveBlendPosition);
+        const float currentDriveDb = driveIsSmoothing
+            ? driveDbSmooth_.getNextValue()
+            : steadyDriveDb;
+        const float driveBlend = driveIsSmoothing
+            ? driveBlendForDb (currentDriveDb)
+            : steadyDriveBlend;
         if (driveBlend > 0.0f)
         {
-            const float driveGain = std::pow (10.0f, currentDriveDb / 20.0f);
+            const float driveGain = driveIsSmoothing
+                ? std::pow (10.0f, currentDriveDb / 20.0f)
+                : steadyDriveGain;
             const float driven = driveGain * sample;
             float coloured = sample;
             if (curveId == 1)
