@@ -313,6 +313,7 @@ private:
     std::array<juce::String, maxBanks> bankNames_;
     std::atomic<int> activeBankSlot_ { 0 };
     std::atomic<const SF2Loader*> activeLoader_ { nullptr };
+    std::atomic<std::uint32_t> audioBlocksInFlight_ { 0 };
     std::vector<std::shared_ptr<const SF2Loader>> retiredLoaders_;
 
     // Bank generation counters: incremented on each successful loadSoundFont()

@@ -177,7 +177,7 @@ void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, const SF2Loader
         const int program = currentProgram_.load (std::memory_order_relaxed);
         if (const Sample* sample = loader.getSample (bank, program, event.note, event.velocity))
         {
-            voicePool_->start (sample, event.note, static_cast<float> (event.velocity) / 127.0f);
+            voicePool_->start (sample, event.note, static_cast<float> (event.velocity) / 127.0f, &loader);
             // Capture bank token for this voice
             const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
             const int voiceIndex = voicePool_->voiceIndexForNote (event.note);
@@ -205,7 +205,8 @@ void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, const 
         const int program = currentProgram_.load (std::memory_order_relaxed);
         if (const Sample* sample = loader.getSample (bank, program, msg.getNoteNumber(), msg.getVelocity()))
         {
-            voicePool_->start (sample, msg.getNoteNumber(), static_cast<float> (msg.getVelocity()) / 127.0f);
+            voicePool_->start (sample, msg.getNoteNumber(),
+                               static_cast<float> (msg.getVelocity()) / 127.0f, &loader);
             // Capture bank token for this voice
             const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
             const int voiceIndex = voicePool_->voiceIndexForNote (msg.getNoteNumber());
@@ -359,11 +360,32 @@ void RomplerProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start,
 
 void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    struct AudioBlockReadScope
+    {
+        explicit AudioBlockReadScope (std::atomic<std::uint32_t>& activeBlocks) noexcept
+            : activeBlocks_ (activeBlocks)
+        {
+            activeBlocks_.fetch_add (1, std::memory_order_seq_cst);
+        }
+
+        ~AudioBlockReadScope()
+        {
+            activeBlocks_.fetch_sub (1, std::memory_order_seq_cst);
+        }
+
+        AudioBlockReadScope (const AudioBlockReadScope&) = delete;
+        AudioBlockReadScope& operator= (const AudioBlockReadScope&) = delete;
+
+    private:
+        std::atomic<std::uint32_t>& activeBlocks_;
+    };
+
+    const AudioBlockReadScope audioBlockReadScope (audioBlocksInFlight_);
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
     syncBlockParameters();
 
-    const SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
+    const SF2Loader* loader = activeLoader_.load (std::memory_order_seq_cst);
     if (! voicePool_)
         return;
 
@@ -493,7 +515,7 @@ void RomplerProcessor::loadSoundFont(const juce::File& file, int bankSlot)
         const auto [bank, program] = newLoader->firstPresetProgram();
         currentBank_.store (bank, std::memory_order_relaxed);
         currentProgram_.store (program, std::memory_order_relaxed);
-        activeLoader_.store (newLoader.get(), std::memory_order_release);
+        activeLoader_.store (newLoader.get(), std::memory_order_seq_cst);
     }
 
     // Retire the old loader for this slot.
@@ -514,7 +536,7 @@ void RomplerProcessor::removeBank(int bankSlot)
         // If removing the active slot, clear activeLoader_ first.
         if (bankSlot == activeBankSlot_.load (std::memory_order_relaxed))
         {
-            activeLoader_.store (nullptr, std::memory_order_release);
+            activeLoader_.store (nullptr, std::memory_order_seq_cst);
             currentBank_.store (0, std::memory_order_relaxed);
             currentProgram_.store (0, std::memory_order_relaxed);
         }
@@ -531,7 +553,7 @@ void RomplerProcessor::switchBank(int bankSlot)
     activeBankSlot_.store (bankSlot, std::memory_order_relaxed);
 
     auto* loader = sf2Loaders_[static_cast<std::size_t> (bankSlot)].get();
-    activeLoader_.store (loader, std::memory_order_release);
+    activeLoader_.store (loader, std::memory_order_seq_cst);
 
     if (loader)
     {
@@ -798,13 +820,20 @@ void RomplerProcessor::mirrorNormalizedParameter (const char* parameterId, float
 
 void RomplerProcessor::drainRetiredLoaders() noexcept
 {
-    // Message thread only. Destroy all retired loaders at once.
-    // In the current conservative design, we assume all voices using
-    // a retired loader have long since finished rendering by the time
-    // we drain (i.e., multiple blocks after the retire event).
-    // A future optimization could track which voices still reference
-    // which generation of each slot, and drain only truly-orphaned loaders.
-    retiredLoaders_.clear();
+    // Message thread only. A block reader protects the raw activeLoader_ pointer
+    // until processBlock exits; per-loader voice leases protect samples retained
+    // across blocks. Release only loaders for which both conditions are clear.
+    if (audioBlocksInFlight_.load (std::memory_order_seq_cst) != 0)
+        return;
+
+    auto loader = retiredLoaders_.begin();
+    while (loader != retiredLoaders_.end())
+    {
+        if (! *loader || ! (*loader)->hasVoiceSampleReferences())
+            loader = retiredLoaders_.erase (loader);
+        else
+            ++loader;
+    }
 }
 
 void RomplerProcessor::timerCallback()

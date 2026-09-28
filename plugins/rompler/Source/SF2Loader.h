@@ -5,6 +5,7 @@
 #include <x10/sf2/Sf2Flattener.h>
 #include <x10/instrument/RegionIndex.h>
 #include <juce_core/juce_core.h>
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <unordered_map>
@@ -31,6 +32,20 @@ public:
 
     [[nodiscard]] int hostSampleRate() const noexcept { return hostSampleRate_; }
 
+    /** Audio-thread voice lease counters used to retire sample storage safely. */
+    void retainVoiceSample() const noexcept
+    {
+        voiceSampleReferences_.fetch_add (1, std::memory_order_relaxed);
+    }
+    void releaseVoiceSample() const noexcept
+    {
+        voiceSampleReferences_.fetch_sub (1, std::memory_order_release);
+    }
+    [[nodiscard]] bool hasVoiceSampleReferences() const noexcept
+    {
+        return voiceSampleReferences_.load (std::memory_order_acquire) != 0;
+    }
+
     /** Approximate bytes held by decoded sample buffers. */
     [[nodiscard]] std::size_t sampleStorageBytes() const noexcept;
 
@@ -46,6 +61,7 @@ public:
 
 private:
     int hostSampleRate_;
+    mutable std::atomic<int> voiceSampleReferences_ { 0 };
     std::unique_ptr<x10::instrument::RegionIndex> regionIndex_;
     std::unordered_map<const x10::instrument::Region*, Sample> samples_;
 

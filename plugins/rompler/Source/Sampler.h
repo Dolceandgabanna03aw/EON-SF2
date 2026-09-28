@@ -14,6 +14,8 @@
 
 namespace aod
 {
+class SF2Loader;
+
 /**
     Lightweight bank-generation token passed by value to Voice.
     Allows deferred cleanup of retired SoundFont instances without
@@ -54,7 +56,9 @@ struct Sample
 class Voice
 {
 public:
-    void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    ~Voice();
+    void start(const Sample* sample, int midiNote, float velocity,
+               const SF2Loader* sampleOwner = nullptr) noexcept;
     /**
         Legato retarget: changes the sounding note/pitch of an already-active
         voice without resetting the envelope, phase or loop state. Used when
@@ -62,7 +66,8 @@ public:
         down, so the pitch glides on the same voice instead of a fresh attack.
         No-op if the voice is not currently active.
     */
-    void retarget(const Sample* sample, int midiNote) noexcept;
+    void retarget(const Sample* sample, int midiNote,
+                  const SF2Loader* sampleOwner = nullptr) noexcept;
     /** Immediately retires the slot and clears its current note ownership. */
     void retire() noexcept;
     /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
@@ -93,6 +98,7 @@ public:
 
 private:
     const Sample* sample_ = nullptr;
+    const SF2Loader* sampleOwner_ = nullptr;
     double phase_ = 0.0;
     float velocity_ = 0.0f;
     bool active_ = false;
@@ -138,6 +144,9 @@ private:
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
     int filterSampleRate_ = 0;
+
+    void bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept;
+    void detachSample() noexcept;
 };
 
 class VoicePool
@@ -171,7 +180,8 @@ public:
     /** Caps the number of concurrently playing voices. Call from the audio thread. */
     void setPolyphony(int numVoices) noexcept;
 
-    void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    void start(const Sample* sample, int midiNote, float velocity,
+               const SF2Loader* sampleOwner = nullptr) noexcept;
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
@@ -215,7 +225,8 @@ private:
     int leadVoiceIndex_ = -1;
 
     void releaseNote(int midiNote) noexcept;
-    void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept;
+    void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
+                    const SF2Loader* sampleOwner) noexcept;
     [[nodiscard]] bool isProtectedFromStealing(std::size_t voiceIndex) const noexcept;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;

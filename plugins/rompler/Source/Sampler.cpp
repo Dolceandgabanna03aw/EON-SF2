@@ -1,5 +1,6 @@
 #include "Sampler.h"
 #include "BandLimitedInterpolator.h"
+#include "SF2Loader.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -23,9 +24,37 @@ double Voice::computePlayRate(const Sample* sample, int midiNote) const noexcept
     return std::pow (2.0, semitones / 12.0);
 }
 
-void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
+Voice::~Voice()
 {
+    detachSample();
+}
+
+void Voice::bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept
+{
+    const auto* previousOwner = sampleOwner_;
+    if (sampleOwner != previousOwner && sampleOwner != nullptr)
+        sampleOwner->retainVoiceSample();
+
     sample_ = sample;
+    sampleOwner_ = sampleOwner;
+
+    if (sampleOwner != previousOwner && previousOwner != nullptr)
+        previousOwner->releaseVoiceSample();
+}
+
+void Voice::detachSample() noexcept
+{
+    const auto* previousOwner = sampleOwner_;
+    sample_ = nullptr;
+    sampleOwner_ = nullptr;
+    if (previousOwner != nullptr)
+        previousOwner->releaseVoiceSample();
+}
+
+void Voice::start(const Sample* sample, int midiNote, float velocity,
+                  const SF2Loader* sampleOwner) noexcept
+{
+    bindSample (sample, sampleOwner);
     velocity_ = velocity;
     midiNote_ = midiNote;
     phase_ = 0.0;
@@ -54,7 +83,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     adsr_.noteOn();
 }
 
-void Voice::retarget(const Sample* sample, int midiNote) noexcept
+void Voice::retarget(const Sample* sample, int midiNote, const SF2Loader* sampleOwner) noexcept
 {
     if (!active_)
         return;
@@ -71,7 +100,7 @@ void Voice::retarget(const Sample* sample, int midiNote) noexcept
         hasLoopWrapped_ = false;
     }
 
-    sample_ = sample;
+    bindSample (sample, sampleOwner);
     midiNote_ = midiNote;
     playRate_ = computePlayRate (sample, midiNote);
 }
@@ -80,7 +109,7 @@ void Voice::retire() noexcept
 {
     active_ = false;
     midiNote_ = -1;
-    sample_ = nullptr;
+    detachSample();
     envelopeLevel_ = 0.0f;
 }
 
@@ -111,6 +140,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     if (sample_ == nullptr || sample_->data.empty())
     {
         active_ = false;
+        detachSample();
         envelopeLevel_ = 0.0f;
         return;
     }
@@ -193,6 +223,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         if (env <= 0.0f && !adsr_.isActive())
         {
             active_ = false;
+            detachSample();
             envelopeLevel_ = 0.0f;
             break;
         }
@@ -227,6 +258,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
                 else
                 {
                     active_ = false;
+                    detachSample();
                     envelopeLevel_ = 0.0f;
                     break;
                 }
@@ -409,7 +441,8 @@ void VoicePool::setLegatoEnabled(bool enabled) noexcept
     legatoEnabled_ = enabled;
 }
 
-void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept
+void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
+                           const SF2Loader* sampleOwner) noexcept
 {
     const int voiceIndex = static_cast<int> (&voice - voices_.data());
     const int victimNote = voice.note();
@@ -417,13 +450,14 @@ void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, flo
         && noteToVoice_[static_cast<std::size_t>(victimNote)] == voiceIndex)
         noteToVoice_[static_cast<std::size_t>(victimNote)] = -1;
 
-    voice.start (sample, midiNote, velocity);
+    voice.start (sample, midiNote, velocity, sampleOwner);
     voice.setStartSequence (nextStartSequence_++);
     noteToVoice_[static_cast<std::size_t>(midiNote)] = voiceIndex;
     leadVoiceIndex_ = voiceIndex;
 }
 
-void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexcept
+void VoicePool::start(const Sample* sample, int midiNote, float velocity,
+                      const SF2Loader* sampleOwner) noexcept
 {
     if (midiNote < 0 || midiNote >= 128)
         return;
@@ -451,7 +485,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
     {
         Voice& lead = voices_[static_cast<std::size_t>(leadVoiceIndex_)];
         const int previousNote = lead.note();
-        lead.retarget (sample, midiNote);
+        lead.retarget (sample, midiNote, sampleOwner);
         if (previousNote >= 0 && previousNote < 128 && previousNote != midiNote
             && noteToVoice_[static_cast<std::size_t>(previousNote)] == leadVoiceIndex_)
             noteToVoice_[static_cast<std::size_t>(previousNote)] = -1;
@@ -467,7 +501,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         && voices_[static_cast<std::size_t>(existing)].note() == midiNote
         && voices_[static_cast<std::size_t>(existing)].isActive())
     {
-        startVoice (voices_[static_cast<std::size_t>(existing)], sample, midiNote, velocity);
+        startVoice (voices_[static_cast<std::size_t>(existing)], sample, midiNote, velocity, sampleOwner);
         return;
     }
 
@@ -475,7 +509,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
     if (voice == nullptr)
         return;
 
-    startVoice (*voice, sample, midiNote, velocity);
+    startVoice (*voice, sample, midiNote, velocity, sampleOwner);
 }
 
 void VoicePool::stop(int midiNote) noexcept
