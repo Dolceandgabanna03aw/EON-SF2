@@ -187,6 +187,13 @@ public:
     /** Caps the number of concurrently playing voices. Call from the audio thread. */
     void setPolyphony(int numVoices) noexcept;
 
+    /**
+        Reserve the scratch buffer used by renderStereo(). This must run before
+        the host starts calling processBlock(); renderStereo() never grows the
+        buffer on the audio thread.
+    */
+    void prepare(int maximumExpectedSamplesPerBlock);
+
     void start(const Sample* sample, int midiNote, float velocity,
                const SF2Loader* sampleOwner = nullptr) noexcept;
     void stop(int midiNote) noexcept;
@@ -212,8 +219,40 @@ public:
                 float attackMs, float decayMs, float sustainLevel, float releaseMs,
                 float pitchBendSemitones, float vibratoDepthCents) noexcept;
 
+    /**
+        Per-lane gains of the synthetic stereo spread.
+
+        Every lane returns the same total power (left^2 + right^2) as the
+        legacy dual-mono signal, and lane 0 is centred at unity in both
+        channels. A zero or negative width therefore collapses all lanes to
+        that centre. Non-finite widths are clamped away by the caller.
+    */
+    struct StereoGains
+    {
+        float left = 1.0f;
+        float right = 1.0f;
+    };
+
+    [[nodiscard]] static StereoGains stereoGainsForVoice(std::size_t voiceIndex, float width) noexcept;
+
+    /**
+        Render the voices into independent L/R accumulators. Each active voice
+        is rendered once into a prepared scratch buffer and then summed into
+        both channels with its per-lane equal-power gain. A width of zero
+        reproduces the legacy mono render copied to both channels. A mono host,
+        an unprepared pool, an oversized host block, or a non-finite width
+        falls back to that same dual-mono path without allocating.
+    */
+    void renderStereo(float* outputLeft, float* outputRight, int numSamples,
+                      int hostSampleRate, float driveDb, float velToDriveDb,
+                      int curveId, int filterRouting, float filterOffsetCents,
+                      float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                      float pitchBendSemitones, float vibratoDepthCents,
+                      float stereoWidth) noexcept;
+
 private:
     std::vector<Voice> voices_;
+    std::vector<float> stereoScratch_;
     const BandLimitedInterpolator* interpolator_ = nullptr;
     std::array<int, 128> noteToVoice_ {};
     int polyphony_ = 0;

@@ -99,6 +99,11 @@ public:
     void paint (juce::Graphics& g) override
     {
         const auto area = getLocalBounds().reduced (1);
+        if (isOpaque())
+        {
+            g.setColour (findColour (juce::Label::backgroundColourId));
+            g.fillRoundedRectangle (area.toFloat(), 4.0f);
+        }
         const auto text = getText();
         if (text.isEmpty())
             return;
@@ -121,9 +126,16 @@ class HardwareButton final : public juce::TextButton
 {
 public:
     explicit HardwareButton (const juce::String& text) : juce::TextButton (text) {}
+
+    /** In skin mode the faceplate already paints the button artwork; the
+        control only draws a hover/press state glow and stays transparent. */
+    void setSkinMode (bool on) { skinMode_ = on; repaint(); }
+
     void paintButton (juce::Graphics&, bool isMouseOverButton, bool isButtonDown) override;
 
 private:
+    bool skinMode_ = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HardwareButton)
 };
 
@@ -165,6 +177,10 @@ public:
     /** Optionally override the printed name with an explicit UI label. */
     void setNameOverride (const juce::String& label) { name_.setText (label, juce::dontSendNotification); }
 
+    /** In skin mode the knob body is part of the faceplate image; only the
+        live pointer, fill arc and transient readout are drawn on top. */
+    void setSkinMode (bool on);
+
     /** Pull the current parameter value into the custom-drawn slider immediately. */
     void syncFromParameter();
 
@@ -173,6 +189,7 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -190,6 +207,7 @@ private:
     void timerCallback() override;
     void setReadoutVisible (bool shouldBeVisible);
     void refreshInitState();
+    void paintSkin (juce::Graphics&);
 
     [[maybe_unused]] juce::RangedAudioParameter& param_;
     juce::Slider slider_;
@@ -198,6 +216,7 @@ private:
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
     float lastDragY_ = 0.0f;
     bool hot_ = false;
+    bool skinMode_ = false;
     bool readoutVisible_ = false;
     bool pressed_ = false;
     bool atInit_ = true;
@@ -218,6 +237,10 @@ public:
 
     void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
 
+    /** In skin mode only the live choice is drawn over the faceplate
+        artwork: a capsule readout for CURVE, an LED strip for OVERSAMPLE. */
+    void setSkinMode (bool on) { skinMode_ = on; label_.setVisible (! on); repaint(); }
+
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -227,6 +250,7 @@ public:
 
 private:
     void advanceChoice();
+    void paintSkin (juce::Graphics&);
 
     [[maybe_unused]] juce::AudioParameterChoice& param_;
     DepthLabel label_;
@@ -235,6 +259,7 @@ private:
     juce::Rectangle<int> pill_;
     float lastDragY_ = 0.0f;
     bool leds_ = false;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Switch)
 };
@@ -251,6 +276,10 @@ public:
 
     void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
 
+    /** In skin mode the painted PRE/POST pill stays visible; the control
+        only highlights the active half. */
+    void setSkinMode (bool on) { skinMode_ = on; label_.setVisible (! on); repaint(); }
+
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -260,6 +289,7 @@ private:
     DepthLabel label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Toggle)
 };
@@ -276,6 +306,10 @@ class PitchWheel final : public juce::Component
 public:
     explicit PitchWheel (std::function<void (float)> onChange);
     ~PitchWheel() override;
+
+    /** In skin mode only the carriage position marker is drawn over the
+        painted wheel slot. */
+    void setSkinMode (bool on) { skinMode_ = on; label_.setVisible (! on); repaint(); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -294,6 +328,7 @@ private:
     bool dragging_ = false;
     float dragStartY_ = 0.0f;
     float dragStartValue_ = 0.0f;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchWheel)
 };
@@ -309,6 +344,10 @@ class ModWheel final : public juce::Component
 public:
     explicit ModWheel (std::function<void (float)> onChange);
     ~ModWheel() override;
+
+    /** In skin mode only the carriage position marker is drawn over the
+        painted wheel slot. */
+    void setSkinMode (bool on) { skinMode_ = on; label_.setVisible (! on); repaint(); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -327,6 +366,7 @@ private:
     bool dragging_ = false;
     float dragStartY_ = 0.0f;
     float dragStartValue_ = 0.0f;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModWheel)
 };
@@ -345,6 +385,10 @@ public:
     ~Stepper() override;
 
     void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
+
+    /** In skin mode the digit window replaces the painted readout with a
+        live LCD; the legend stays printed on the faceplate. */
+    void setSkinMode (bool on) { skinMode_ = on; label_.setVisible (! on); repaint(); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -367,6 +411,7 @@ private:
     juce::Slider slider_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
     float lastDragY_ = 0.0f;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Stepper)
 };
@@ -379,11 +424,16 @@ public:
     ~PeakMeter() override;
 
     void setLevel (float level);   // 0..1
+
+    /** In skin mode only the lit segments draw over the painted meter strip. */
+    void setSkinMode (bool on) { skinMode_ = on; repaint(); }
+
     void paint (juce::Graphics&) override;
 
 private:
     static constexpr int numSegments = 8;
     float level_ = 0.0f;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PeakMeter)
 };
@@ -396,11 +446,16 @@ public:
     ~GainReductionMeter() override;
 
     void setReductionDb (float reductionDb);
+
+    /** In skin mode only the lit segments draw over the painted GR strip. */
+    void setSkinMode (bool on) { skinMode_ = on; repaint(); }
+
     void paint (juce::Graphics&) override;
 
 private:
     static constexpr int numSegments = 6;
     float reductionDb_ = 0.0f;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GainReductionMeter)
 };
@@ -429,6 +484,10 @@ public:
     void setNoteCallback (std::function<void (int, bool)> cb) { noteCallback_ = std::move (cb); }
     int findNote (juce::Point<float>) const;
 
+    /** In skin mode the painted keybed stays visible; only pressed-key
+        highlights are drawn on top. */
+    void setSkinMode (bool on) { skinMode_ = on; repaint(); }
+
 private:
     juce::Rectangle<int> boundsFor (const PianoKey&) const;
 
@@ -436,6 +495,7 @@ private:
     int numWhite_ = 0;
     juce::HashMap<int, bool> lit_;
     std::function<void (int, bool)> noteCallback_;   // set by the editor -> postNote
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Keyboard)
 };
@@ -502,6 +562,10 @@ public:
                    juce::RangedAudioParameter& release);
     ~EnvelopeGraph() override;
 
+    /** In skin mode the curve and drag points draw directly over the
+        painted ENV display; no bezel or screen is painted. */
+    void setSkinMode (bool on) { skinMode_ = on; repaint(); }
+
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -517,6 +581,7 @@ private:
     std::array<juce::Slider, 4> sliders_;
     std::array<std::unique_ptr<juce::SliderParameterAttachment>, 4> attachments_;
     int activeStage_ = -1;
+    bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EnvelopeGraph)
 };
@@ -541,6 +606,9 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+
+    /** The image-space canvas used by the skin and its interactive overlays. */
+    [[nodiscard]] juce::Rectangle<int> getSkinCanvasBoundsForTesting() const noexcept;
 
 private:
     RomplerProcessor& processor_;
@@ -602,11 +670,13 @@ private:
     void loadPresetUuid (const juce::String& uuid);
     void handlePresetDirtyChoice (const juce::String& uuid, PresetBrowserOverlay::DirtyChoice choice);
     void onLoadButtonClicked();
+    void layoutSkin();
     void layoutVoiceControls (juce::Rectangle<int> area);
     void layoutBusControls (juce::Rectangle<int> area);
     void layoutCompControls (juce::Rectangle<int> area);
     void layoutEnvControls (juce::Rectangle<int> area);
     void layoutFxControls (juce::Rectangle<int> area);
+    [[nodiscard]] juce::Rectangle<float> skinCanvasBounds() const noexcept;
 
     void comboBoxChanged (juce::ComboBox*) override;
     void timerCallback() override;

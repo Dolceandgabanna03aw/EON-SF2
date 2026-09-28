@@ -3,7 +3,9 @@
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace
 {
@@ -65,6 +67,54 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
         peak = std::max (peak, buffer.getMagnitude (ch, 0, kBlockSize));
 
     REQUIRE (peak > 0.0f);
+}
+
+TEST_CASE ("the processor emits a spread stereo chord", "[sf2][m1][stereo]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (testSf2File()));
+    const auto [bank, program] = loader.firstPresetProgram();
+    std::vector<int> soundingKeys;
+    for (int key = 0; key < 128 && soundingKeys.size() < 3; ++key)
+        if (loader.getSample (bank, program, key, 100) != nullptr)
+            soundingKeys.push_back (key);
+    REQUIRE (soundingKeys.size() == 3);
+
+    aod::RomplerProcessor processor;
+    processor.loadSoundFont (testSf2File());
+    processor.selectPreset (bank, program);
+    auto& state = processor.getValueTreeState();
+    for (const auto* id : { aod::ParamIDs::fxChorusMix,
+                            aod::ParamIDs::fxReverbMix,
+                            aod::ParamIDs::fxDelayMix })
+        REQUIRE (state.getParameter (id) != nullptr);
+    state.getParameter (aod::ParamIDs::fxChorusMix)->setValueNotifyingHost (0.0f);
+    state.getParameter (aod::ParamIDs::fxReverbMix)->setValueNotifyingHost (0.0f);
+    state.getParameter (aod::ParamIDs::fxDelayMix)->setValueNotifyingHost (0.0f);
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    juce::AudioBuffer<float> buffer (2, kBlockSize);
+    juce::MidiBuffer midi;
+    for (const int key : soundingKeys)
+        midi.addEvent (juce::MidiMessage::noteOn (1, key, static_cast<juce::uint8> (100)), 0);
+    processor.processBlock (buffer, midi);
+
+    REQUIRE (processor.getActiveVoiceCountForTesting() >= 3);
+    const float leftPeak = buffer.getMagnitude (0, 0, kBlockSize);
+    const float rightPeak = buffer.getMagnitude (1, 0, kBlockSize);
+    REQUIRE (leftPeak > 0.0f);
+    REQUIRE (rightPeak > 0.0f);
+    float maximumChannelDifference = 0.0f;
+    for (int sample = 0; sample < kBlockSize; ++sample)
+        maximumChannelDifference = std::max (maximumChannelDifference,
+            std::abs (buffer.getSample (0, sample) - buffer.getSample (1, sample)));
+    REQUIRE (maximumChannelDifference > 1.0e-5f);
+
+    processor.releaseResources();
 }
 
 TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")

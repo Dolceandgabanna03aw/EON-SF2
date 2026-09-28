@@ -11,9 +11,12 @@ add_executable(rompler_tests
     test_preset_library.cpp
     test_processor_presets.cpp
     test_preset_browser_overlay.cpp
+    test_editor_resize.cpp
     test_knob_init_state.cpp
     test_editor_preset_header.cpp
     test_output_safety.cpp
+    test_stereo_render.cpp
+    test_output_headroom_benchmark.cpp
     test_full_processor_cpu.cpp)
 
 # EONDS50 carries the JucePlugin_* definitions PUBLIC, but JUCE modules

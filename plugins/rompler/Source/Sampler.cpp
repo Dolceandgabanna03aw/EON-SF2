@@ -14,6 +14,23 @@ namespace
     // or user-configurable per the spec; a gentle ~5.5 Hz reads as natural
     // vocal/string-style vibrato without sounding like a tremolo effect.
     constexpr float kVibratoRateHz = 5.5f;
+
+    // Lane layout for the synthetic stereo spread, indexed by voice slot.
+    // Lane 0 stays in the centre, so the first voice of a fresh phrase (which
+    // always takes the lowest idle slot) remains dual-mono. The remaining lanes
+    // alternate in mirrored pairs, which keeps the position set exactly
+    // left/right balanced, and their magnitude never exceeds 0.5 so the widest
+    // lane still cannot saturate against the pan clamp at full width.
+    constexpr std::array<float, 9> kStereoVoicePositions {
+        0.0f, -0.30f, 0.30f, -0.48f, 0.48f, -0.14f, 0.14f, -0.38f, 0.38f
+    };
+
+    constexpr float kEqualPowerHalfPi = juce::MathConstants<float>::halfPi;
+    // Equal power passes through 1/sqrt(2) at the centre. Scaling by sqrt(2)
+    // keeps a centred voice at unity in both channels, so width zero reproduces
+    // the legacy dual-mono signal exactly and every lane carries the same total
+    // power (left^2 + right^2) regardless of where it sits in the image.
+    constexpr float kEqualPowerUnityScale = juce::MathConstants<float>::sqrt2;
 }
 
 double Voice::computePlayRate(const Sample* sample, int midiNote) const noexcept
@@ -471,6 +488,17 @@ void VoicePool::setPolyphony(int numVoices) noexcept
     polyphony_ = newLimit;
 }
 
+void VoicePool::prepare(int maximumExpectedSamplesPerBlock)
+{
+    if (maximumExpectedSamplesPerBlock <= 0)
+    {
+        stereoScratch_.clear();
+        return;
+    }
+
+    stereoScratch_.assign (static_cast<std::size_t> (maximumExpectedSamplesPerBlock), 0.0f);
+}
+
 void VoicePool::setSustainHeld(bool held) noexcept
 {
     if (sustainHeld_ == held)
@@ -702,6 +730,72 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
                     && noteToVoice_[static_cast<std::size_t>(note)] == static_cast<int>(i))
                     noteToVoice_[static_cast<std::size_t>(note)] = -1;
             }
+        }
+}
+
+VoicePool::StereoGains VoicePool::stereoGainsForVoice (std::size_t voiceIndex, float width) noexcept
+{
+    const float safeWidth = juce::jlimit (0.0f, 1.0f, width);
+    const float position = kStereoVoicePositions[voiceIndex % kStereoVoicePositions.size()];
+    const float pan = juce::jlimit (0.0f, 1.0f, 0.5f + position * safeWidth);
+
+    return { kEqualPowerUnityScale * std::sin ((1.0f - pan) * kEqualPowerHalfPi),
+             kEqualPowerUnityScale * std::sin (pan * kEqualPowerHalfPi) };
+}
+
+void VoicePool::renderStereo(float* outputLeft, float* outputRight, int numSamples,
+                             int hostSampleRate, float driveDb, float velToDriveDb,
+                             int curveId, int filterRouting, float filterOffsetCents,
+                             float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                             float pitchBendSemitones, float vibratoDepthCents,
+                             float stereoWidth) noexcept
+{
+    if (outputLeft == nullptr || numSamples <= 0)
+        return;
+
+    // A mono host, an unprepared pool, or an unexpectedly oversized host block
+    // must remain safe. The fallback deliberately preserves the old dual-mono
+    // behaviour instead of allocating in the real-time path. A zero or negative
+    // width is not a fallback case: it is a normal render whose every lane
+    // collapses to the centre, so the two paths stay continuous at the origin.
+    if (outputRight == nullptr || outputRight == outputLeft
+        || stereoScratch_.size() < static_cast<std::size_t> (numSamples)
+        || ! std::isfinite (stereoWidth))
+    {
+        render (outputLeft, numSamples, hostSampleRate, driveDb, velToDriveDb,
+                curveId, filterRouting, filterOffsetCents,
+                attackMs, decayMs, sustainLevel, releaseMs,
+                pitchBendSemitones, vibratoDepthCents);
+        if (outputRight != nullptr && outputRight != outputLeft)
+            juce::FloatVectorOperations::copy (outputRight, outputLeft, numSamples);
+        return;
+    }
+
+    std::fill (outputLeft, outputLeft + numSamples, 0.0f);
+    std::fill (outputRight, outputRight + numSamples, 0.0f);
+
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+    for (std::size_t i = 0; i < limit; ++i)
+        if (voices_[i].isActive())
+        {
+            auto* scratch = stereoScratch_.data();
+            std::fill (scratch, scratch + numSamples, 0.0f);
+            voices_[i].render (scratch, numSamples, hostSampleRate, driveDb, velToDriveDb,
+                               curveId, filterRouting, filterOffsetCents,
+                               attackMs, decayMs, sustainLevel, releaseMs,
+                               pitchBendSemitones, vibratoDepthCents, *interpolator_);
+
+            if (! voices_[i].isActive())
+            {
+                const int note = voices_[i].note();
+                if (note >= 0 && note < 128
+                    && noteToVoice_[static_cast<std::size_t> (note)] == static_cast<int> (i))
+                    noteToVoice_[static_cast<std::size_t> (note)] = -1;
+            }
+
+            const auto gains = stereoGainsForVoice (i, stereoWidth);
+            juce::FloatVectorOperations::addWithMultiply (outputLeft, scratch, gains.left, numSamples);
+            juce::FloatVectorOperations::addWithMultiply (outputRight, scratch, gains.right, numSamples);
         }
 }
 

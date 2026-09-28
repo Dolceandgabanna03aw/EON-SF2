@@ -14,6 +14,14 @@
 namespace aod
 {
 
+namespace
+{
+    // Initial synthetic spread for mono SF2 voices. Keep this internal until
+    // a user-facing parameter is approved; the existing CC10 pan remains the
+    // global image control.
+    constexpr float kInitialVoiceStereoWidth = 0.60f;
+}
+
 RomplerProcessor::RomplerProcessor()
     : juce::AudioProcessor (BusesProperties()
                                 .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -36,10 +44,17 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
 {
     sampleRate_ = sampleRate;
     voicePool_ = std::make_unique<VoicePool> (VoicePool::maxVoices);
+    voicePool_->prepare (maximumExpectedSamplesPerBlock);
 
-    // Surface the bundled SoundFont so the plugin starts usable without a
-    // manual Load step when the packaged font is present.
-    loadBundledSoundFont();
+    // Some hosts call prepareToPlay again without releaseResources(). Keep
+    // loaded banks matched to the new rate, but do the work on the message
+    // thread: prepareToPlay runs on a host-chosen thread where loadSoundFont()
+    // is not safe to call, and a rate change means file I/O plus a resample
+    // pass per bank. The flag re-arms on every prepare, so the drain
+    // converges every slot to the most recently requested rate; a
+    // block-size-only change reloads nothing.
+    pendingBankReloadRate_.store (static_cast<int> (sampleRate), std::memory_order_release);
+    queueAsyncFlag (reloadBanksForRate | offerBundledFont);
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     dynamicsProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
@@ -67,7 +82,7 @@ void RomplerProcessor::releaseResources()
             retiredLoaders_.push_back (std::move (slot));
     }
 
-    bundledFontLoaded_ = false;
+    bundledFontLoaded_.store (false, std::memory_order_relaxed);
     voicePool_.reset();
     dynamicsProcessor_.reset();
     
@@ -105,15 +120,22 @@ void RomplerProcessor::syncBlockParameters() noexcept
         queueAsyncFlag (mirrorLatency);
     }
 
-    const int requestedLegato = static_cast<int> (value (ParamIDs::voiceLegato,
-                                                          static_cast<float> (cachedLegatoParamValue_)));
-    if (requestedLegato != cachedLegatoParamValue_)
+    // A captured CC65 is authoritative until its deferred APVTS mirror lands;
+    // re-reading the parameter before then would restore the pre-controller
+    // value and drop legato after a single block. Same policy as CC71/74.
+    if (legatoCcGeneration_.load (std::memory_order_acquire)
+        == legatoMirroredGeneration_.load (std::memory_order_acquire))
     {
-        cachedLegatoParamValue_ = requestedLegato;
-        const bool enabled = requestedLegato != 0;
-        legatoEnabled_.store (enabled, std::memory_order_relaxed);
-        if (voicePool_)
-            voicePool_->setLegatoEnabled (enabled);
+        const int requestedLegato = static_cast<int> (value (ParamIDs::voiceLegato,
+                                                              static_cast<float> (cachedLegatoParamValue_)));
+        if (requestedLegato != cachedLegatoParamValue_)
+        {
+            cachedLegatoParamValue_ = requestedLegato;
+            const bool enabled = requestedLegato != 0;
+            legatoEnabled_.store (enabled, std::memory_order_relaxed);
+            if (voicePool_)
+                voicePool_->setLegatoEnabled (enabled);
+        }
     }
 
     blockParameters_.driveDb = value (ParamIDs::voiceDrive, 0.0f);
@@ -277,6 +299,10 @@ void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, const 
                 legatoEnabled_.store (enabled, std::memory_order_relaxed);
                 voicePool_->setLegatoEnabled (enabled);
                 cachedLegatoParamValue_ = enabled ? 1 : 0;
+                legatoCcGeneration_.fetch_add (1, std::memory_order_acq_rel);
+                pendingLegatoNormalized_.store (enabled ? 1.0f : 0.0f, std::memory_order_release);
+                legatoCcGeneration_.fetch_add (1, std::memory_order_release);
+                queueAsyncFlag (mirrorLegato);
                 break;
             }
             case 71:
@@ -321,20 +347,24 @@ void RomplerProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start,
     juce::AudioBuffer<float> range (channels.data(), numChannels, count);
 
     float* outL = range.getWritePointer (0);
-    voicePool_->render (outL, count, static_cast<int> (sampleRate_), blockParameters_.driveDb,
-                        blockParameters_.velToDriveDb, blockParameters_.curveId,
-                        blockParameters_.filterRouting, blockParameters_.filterOffsetCents,
-                        blockParameters_.attackMs, blockParameters_.decayMs,
-                        blockParameters_.sustainLevel, blockParameters_.releaseMs,
-                        blockParameters_.pitchBendSemitones, blockParameters_.vibratoDepthCents);
+    float* outR = numChannels > 1 ? range.getWritePointer (1) : nullptr;
+    voicePool_->renderStereo (outL, outR, count, static_cast<int> (sampleRate_),
+                              blockParameters_.driveDb, blockParameters_.velToDriveDb,
+                              blockParameters_.curveId, blockParameters_.filterRouting,
+                              blockParameters_.filterOffsetCents, blockParameters_.attackMs,
+                              blockParameters_.decayMs, blockParameters_.sustainLevel,
+                              blockParameters_.releaseMs, blockParameters_.pitchBendSemitones,
+                              blockParameters_.vibratoDepthCents, kInitialVoiceStereoWidth);
 
     if (blockParameters_.ccGain != 1.0f)
-        juce::FloatVectorOperations::multiply (outL, blockParameters_.ccGain, count);
-
-    if (numChannels > 1)
     {
-        float* outR = range.getWritePointer (1);
-        juce::FloatVectorOperations::copy (outR, outL, count);
+        juce::FloatVectorOperations::multiply (outL, blockParameters_.ccGain, count);
+        if (outR != nullptr)
+            juce::FloatVectorOperations::multiply (outR, blockParameters_.ccGain, count);
+    }
+
+    if (outR != nullptr)
+    {
         if (blockParameters_.pan != 0.5f)
         {
             const float pan = juce::jlimit (0.0f, 1.0f, blockParameters_.pan);
@@ -642,14 +672,17 @@ namespace
 
 void RomplerProcessor::loadBundledSoundFont()
 {
-    if (bundledFontLoaded_)
+    // Never replace a bank that is already in slot 0: the offer now runs on
+    // the message-thread drain after prepareToPlay(), and a session restore
+    // or explicit load can legitimately land in between.
+    if (bundledFontLoaded_.load (std::memory_order_relaxed) || sf2Loaders_[0])
         return;
 
     const juce::File file = pathForBundledSoundFont();
     if (file.existsAsFile())
     {
         loadSoundFont (file, 0);
-        bundledFontLoaded_ = isBankLoaded (0);
+        bundledFontLoaded_.store (isBankLoaded (0), std::memory_order_relaxed);
     }
 }
 
@@ -818,6 +851,38 @@ void RomplerProcessor::mirrorNormalizedParameter (const char* parameterId, float
         parameter->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, normalizedValue));
 }
 
+void RomplerProcessor::reloadBanksForPreparedRate()
+{
+    // Message thread only. prepareToPlay() publishes the rate it was called
+    // with and arms reloadBanksForRate; doing the decode here keeps file I/O
+    // and the resample pass off the host's prepare thread, and keeps
+    // sf2Loaders_/bankNames_/retiredLoaders_ single-threaded with the editor
+    // and timer paths. The flag re-arms per prepare, so a rate change that
+    // lands mid-drain simply re-checks every slot on the next tick.
+    const int rate = pendingBankReloadRate_.load (std::memory_order_acquire);
+    const int activeSlot = activeBankSlot_.load (std::memory_order_relaxed);
+    const int selectedBank = currentBank_.load (std::memory_order_relaxed);
+    const int selectedProgram = currentProgram_.load (std::memory_order_relaxed);
+    bool activeSlotReloaded = false;
+    for (int slot = 0; slot < maxBanks; ++slot)
+    {
+        const auto index = static_cast<std::size_t> (slot);
+        if (sf2Loaders_[index] && sf2Loaders_[index]->hostSampleRate() != rate)
+        {
+            loadSoundFont (juce::File (bankNames_[index]), slot);
+            activeSlotReloaded |= slot == activeSlot;
+        }
+    }
+    if (activeSlotReloaded)
+    {
+        // loadSoundFont() publishes the bank's first preset when it reloads
+        // the active slot; keep the selection the session had before the
+        // rate change.
+        currentBank_.store (selectedBank, std::memory_order_relaxed);
+        currentProgram_.store (selectedProgram, std::memory_order_relaxed);
+    }
+}
+
 void RomplerProcessor::drainRetiredLoaders() noexcept
 {
     // Message thread only. A block reader protects the raw activeLoader_ pointer
@@ -845,6 +910,11 @@ void RomplerProcessor::timerCallback()
     drainRetiredLoaders();
 
     const auto flags = pendingAsyncFlags_.exchange (0, std::memory_order_acq_rel);
+    if ((flags & reloadBanksForRate) != 0)
+        reloadBanksForPreparedRate();
+    if ((flags & offerBundledFont) != 0)
+        loadBundledSoundFont();
+
     if ((flags & mirrorFilterOffset) != 0)
     {
         for (int attempt = 0; attempt < maxControllerMirrorAttempts; ++attempt)
@@ -907,6 +977,37 @@ void RomplerProcessor::timerCallback()
         if (busCutoffCcGeneration_.load (std::memory_order_acquire)
             != busCutoffMirroredGeneration_.load (std::memory_order_acquire))
             queueAsyncFlag (mirrorBusCutoff);
+    }
+    if ((flags & mirrorLegato) != 0)
+    {
+        for (int attempt = 0; attempt < maxControllerMirrorAttempts; ++attempt)
+        {
+            const auto generation = legatoCcGeneration_.load (std::memory_order_acquire);
+            if ((generation & 1u) != 0)
+                continue;
+
+            const auto capturedValue = pendingLegatoNormalized_.load (std::memory_order_acquire);
+            if (beforeControllerMirrorForTesting_)
+                beforeControllerMirrorForTesting_();
+            if (legatoCcGeneration_.load (std::memory_order_acquire) != generation)
+                continue;
+
+            // Same CC71/74 policy: the controller is authoritative from
+            // audio-thread capture until this deferred notification lands.
+            mirrorNormalizedParameter (ParamIDs::voiceLegato, capturedValue);
+
+            if (legatoCcGeneration_.load (std::memory_order_acquire) == generation)
+            {
+                legatoMirroredGeneration_.store (generation, std::memory_order_release);
+                pendingAsyncFlags_.fetch_and (~mirrorLegato, std::memory_order_acq_rel);
+                if (legatoCcGeneration_.load (std::memory_order_acquire) != generation)
+                    queueAsyncFlag (mirrorLegato);
+                break;
+            }
+        }
+        if (legatoCcGeneration_.load (std::memory_order_acquire)
+            != legatoMirroredGeneration_.load (std::memory_order_acquire))
+            queueAsyncFlag (mirrorLegato);
     }
     if ((flags & mirrorLatency) != 0)
     {

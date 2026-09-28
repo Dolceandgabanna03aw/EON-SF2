@@ -29,6 +29,21 @@ user's plugin folder. `COPY_PLUGIN_AFTER_BUILD` is off and installation was not
 performed. VST3 carries the strictness-10 gate; AU validation is a one-command
 follow-up once installation is agreed.
 
+## macOS package deployment
+
+The reproducible package command is:
+
+```zsh
+cmake --build --preset plugin
+SKIP_SIGNATURE=0 tools/package_aoi_yume_pkg_macos.sh
+```
+
+It emits `dist/Aoi-YUME-macOS.pkg` and a SHA256 manifest. The package places
+VST3, AU, and Standalone in the system-wide plugin/application locations. The
+installer package is unsigned until `PKG_SIGN_IDENTITY` is supplied; the
+bundles inside it are still ad-hoc signed for local host use. Packaging does
+not install anything.
+
 **JUCE splash screen is left on.** `JUCE_DISPLAY_SPLASH_SCREEN` is deliberately
 not set to 0: turning it off requires a paid JUCE licence and the tier for this
 project is still unresolved (planning document §10). Setting it would be

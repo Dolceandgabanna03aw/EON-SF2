@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <time.h>
 
 #include "Parameters.h"
 #include "PluginProcessor.h"
@@ -85,9 +86,21 @@ void setDenormalized (aod::RomplerProcessor& processor, const char* id, float va
         parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
 }
 
+double threadCpuTimeMicroseconds()
+{
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec now {};
+    if (clock_gettime (CLOCK_THREAD_CPUTIME_ID, &now) == 0)
+        return 1.0e6 * static_cast<double> (now.tv_sec)
+               + 1.0e-3 * static_cast<double> (now.tv_nsec);
+#endif
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
 struct LongRunStats
 {
     std::vector<double> timings;
+    std::vector<double> threadCpuTimings;
     std::int64_t renderedSamples = 0;
     std::size_t nonFiniteSamples = 0;
     int minActiveVoices = std::numeric_limits<int>::max();
@@ -177,6 +190,7 @@ LongRunStats renderLongRun (aod::RomplerProcessor& processor,
     const auto blockCount = static_cast<std::size_t> (
         (static_cast<std::int64_t> (rate) * durationSeconds + blockSize - 1) / blockSize);
     stats.timings.reserve (blockCount);
+    stats.threadCpuTimings.reserve (blockCount);
     stats.midiBlocks.reserve (blockCount);
     stats.automationBlocks.reserve (blockCount);
     stats.activeVoiceCounts.reserve (blockCount);
@@ -239,11 +253,14 @@ LongRunStats renderLongRun (aod::RomplerProcessor& processor,
             }
         }
 
+        const double threadCpuBegin = threadCpuTimeMicroseconds();
         const auto begin = std::chrono::steady_clock::now();
         processor.processBlock (buffer, midi);
         const auto end = std::chrono::steady_clock::now();
+        const double threadCpuEnd = threadCpuTimeMicroseconds();
         stats.timings.push_back (
             std::chrono::duration<double, std::micro> (end - begin).count());
+        stats.threadCpuTimings.push_back (threadCpuEnd - threadCpuBegin);
         stats.midiBlocks.push_back (static_cast<std::uint8_t> (! midi.isEmpty()));
         stats.automationBlocks.push_back (static_cast<std::uint8_t> (hasAutomation));
         scanFiniteSamples (buffer, stats);
@@ -466,6 +483,25 @@ TEST_CASE ("full processor sustained scenario matrix", "[.][benchmark]")
                     run.fullVoiceDeadlineMisses, run.reducedVoiceDeadlineMisses,
                     static_cast<double> (run.maxPeak),
                     run.nonFiniteSamples);
+
+                for (std::size_t block = 0; block < run.timings.size(); ++block)
+                {
+                    const double wallTime = run.timings[block];
+                    if (wallTime <= deadline)
+                        continue;
+
+                    const double threadCpuTime = run.threadCpuTimings[block];
+                    std::printf (
+                        "FULLCPU_MISS rate=%d block=%d voices=%d block_index=%zu "
+                        "sample_start=%lld wall_us=%.2f thread_cpu_us=%.2f "
+                        "wall_minus_cpu_us=%.2f midi=%d automation=%d active_voices=%d\n",
+                        rate, blockSize, voices, block,
+                        static_cast<long long> (block * static_cast<std::size_t> (blockSize)),
+                        wallTime, threadCpuTime, wallTime - threadCpuTime,
+                        static_cast<int> (run.midiBlocks[block]),
+                        static_cast<int> (run.automationBlocks[block]),
+                        run.activeVoiceCounts[block]);
+                }
 
                 CHECK (run.timings.size() > 0);
                 CHECK (run.nonFiniteSamples == 0);
