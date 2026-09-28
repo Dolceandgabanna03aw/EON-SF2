@@ -71,3 +71,21 @@ DSP 정확도 관련 작업이면 `ctest --preset plugin`도 함께 확인한다
 `git status`로 기존 변경을 확인한다. 더티 워크트리는 사용자 작업일 수 있으므로
 보존하고, 겹치는 부분만 조심해서 다룬다. `git reset --hard`나
 `git checkout --`는 명시적 요청 없이 쓰지 않는다.
+
+## Git 리모트·계정 맵 (GitHub)
+
+- `origin` = `eefsowa-source/aoi-yume` — upstream의 포크
+- `upstream` = `Dolceandgabanna03aw/EON-SF2` — PR은 여기로 보낸다
+- gh credential helper는 **active 계정**의 토큰만 제공한다.
+  리모트별로 필요 계정이 다르면 push 전 `gh auth switch -u <계정>`을 먼저 실행한다.
+  - `eefsowa-source`: origin 포크 push 가능, upstream 쓰기 불가
+  - `Dolceandgabanna03aw`: upstream 소유(머지·push 가능), origin push 불가
+  - `seeeungha`: 읽기 전용. `seeeungha/EON-SF2` 포크를 PR head로 사용 가능
+
+## 외부 검증 도구
+
+- eonqc/soundcraft: `/Users/sungha/.local/bin/eonqc`, `eonqc-host`.
+  매니페스트는 soundcraft 리포 `manifests/aoi-yume-*.json`.
+  오프라인 측정은 DAW 로드·청취 증거를 대신하지 않는다.
+- REAPER 호스트 검증 절차·증거(격리 프로필, 해시 바인딩)는
+  `docs/REAPER-VALIDATION.md` 참조.
