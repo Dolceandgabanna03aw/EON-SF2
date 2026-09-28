@@ -169,13 +169,13 @@ void RomplerProcessor::syncBlockParameters() noexcept
         voicePool_->setPolyphony (blockParameters_.polyphony);
 }
 
-void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, SF2Loader& loader) noexcept
+void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, const SF2Loader& loader) noexcept
 {
     if (event.noteOn)
     {
         const int bank = currentBank_.load (std::memory_order_relaxed);
         const int program = currentProgram_.load (std::memory_order_relaxed);
-        if (Sample* sample = loader.getSample (bank, program, event.note, event.velocity))
+        if (const Sample* sample = loader.getSample (bank, program, event.note, event.velocity))
         {
             voicePool_->start (sample, event.note, static_cast<float> (event.velocity) / 127.0f);
             // Capture bank token for this voice
@@ -197,13 +197,13 @@ void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, SF2Loader& load
     }
 }
 
-void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, SF2Loader& loader) noexcept
+void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, const SF2Loader& loader) noexcept
 {
     if (msg.isNoteOn())
     {
         const int bank = currentBank_.load (std::memory_order_relaxed);
         const int program = currentProgram_.load (std::memory_order_relaxed);
-        if (Sample* sample = loader.getSample (bank, program, msg.getNoteNumber(), msg.getVelocity()))
+        if (const Sample* sample = loader.getSample (bank, program, msg.getNoteNumber(), msg.getVelocity()))
         {
             voicePool_->start (sample, msg.getNoteNumber(), static_cast<float> (msg.getVelocity()) / 127.0f);
             // Capture bank token for this voice
@@ -363,7 +363,7 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     buffer.clear();
     syncBlockParameters();
 
-    SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
+    const SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
     if (! voicePool_)
         return;
 
@@ -474,8 +474,8 @@ void RomplerProcessor::loadSoundFont(const juce::File& file, int bankSlot)
     if (bankSlot < 0 || bankSlot >= maxBanks)
         return;
 
-    auto newLoader = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
-    if (!newLoader->loadFile(file))
+    auto newLoader = SF2Loader::loadCached (file, static_cast<int> (sampleRate_));
+    if (! newLoader)
         return;
 
     // Keep the absolute identity so a captured preset can be restored even

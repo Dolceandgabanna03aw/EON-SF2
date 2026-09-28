@@ -4,12 +4,37 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <list>
+#include <mutex>
 
 namespace aod
 {
 
 namespace
 {
+
+struct CachedBank
+{
+    juce::String path;
+    juce::uint64 fileIdentifier = 0;
+    juce::int64 size = 0;
+    juce::int64 modifiedMilliseconds = 0;
+    juce::int64 createdMilliseconds = 0;
+    int sampleRate = 0;
+    std::size_t sampleBytes = 0;
+    std::shared_ptr<const SF2Loader> loader;
+};
+
+// pluginval revisits the same rates across many prepare/release cycles and
+// processor instances. Keep the cache bounded by both entry count and decoded
+// sample storage so a few unusually large banks cannot pin several GB in a
+// long-running host. Map and allocator overhead is not included in this budget.
+constexpr std::size_t kMaxCachedBanks = 4;
+constexpr std::size_t kMaxCachedSampleBytes = 512u * 1024u * 1024u;
+std::mutex cacheMutex;
+std::list<CachedBank> cachedBanks;
+std::size_t cachedSampleBytes = 0;
 
 /** Converts a little-endian int16 PCM range [start, end) frames into float [-1, 1]. */
 std::vector<float> convertPcmRange(std::span<const std::byte> sampleData,
@@ -33,6 +58,67 @@ std::vector<float> convertPcmRange(std::span<const std::byte> sampleData,
 }
 
 } // namespace
+
+std::shared_ptr<const SF2Loader> SF2Loader::loadCached (const juce::File& file, int hostSampleRate)
+{
+    if (! file.existsAsFile())
+        return {};
+
+    const auto path = file.getFullPathName();
+    const auto fileIdentifier = file.getFileIdentifier();
+    const auto size = file.getSize();
+    const auto modifiedMilliseconds = file.getLastModificationTime().toMilliseconds();
+    const auto createdMilliseconds = file.getCreationTime().toMilliseconds();
+
+    // Keep the lock through a miss so simultaneous prepare calls cannot parse
+    // and resample the same large bank twice. This function is never called by
+    // processBlock or its descendants.
+    const std::lock_guard<std::mutex> lock (cacheMutex);
+    for (auto it = cachedBanks.begin(); it != cachedBanks.end(); ++it)
+    {
+        if (it->path == path && it->fileIdentifier == fileIdentifier
+            && it->size == size && it->createdMilliseconds == createdMilliseconds
+            && it->modifiedMilliseconds == modifiedMilliseconds
+            && it->sampleRate == hostSampleRate)
+        {
+            cachedBanks.splice (cachedBanks.begin(), cachedBanks, it);
+            return cachedBanks.front().loader;
+        }
+    }
+
+    auto loader = std::make_shared<SF2Loader> (hostSampleRate);
+    if (! loader->loadFile (file))
+        return {};
+
+    const auto sampleBytes = loader->sampleStorageBytes();
+    if (sampleBytes > kMaxCachedSampleBytes)
+        return loader;
+
+    cachedBanks.push_front ({ path, fileIdentifier, size, modifiedMilliseconds,
+                              createdMilliseconds, hostSampleRate, sampleBytes, loader });
+    cachedSampleBytes += sampleBytes;
+    while (! cachedBanks.empty()
+           && (cachedBanks.size() > kMaxCachedBanks || cachedSampleBytes > kMaxCachedSampleBytes))
+    {
+        cachedSampleBytes -= cachedBanks.back().sampleBytes;
+        cachedBanks.pop_back();
+    }
+    return loader;
+}
+
+std::size_t SF2Loader::sampleStorageBytes() const noexcept
+{
+    std::size_t bytes = 0;
+    constexpr auto maxBytes = std::numeric_limits<std::size_t>::max();
+    for (const auto& entry : samples_)
+    {
+        const auto capacity = entry.second.data.capacity();
+        if (capacity > (maxBytes - bytes) / sizeof (float))
+            return maxBytes;
+        bytes += capacity * sizeof (float);
+    }
+    return bytes;
+}
 
 bool SF2Loader::loadFile(const juce::File& file)
 {
@@ -87,7 +173,7 @@ bool SF2Loader::loadFile(const juce::File& file)
     return true;
 }
 
-Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) noexcept
+const Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) const noexcept
 {
     if (!regionIndex_)
         return nullptr;

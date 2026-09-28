@@ -106,7 +106,7 @@ public:
 
         Safe to call from the message thread only: it allocates and does file
         I/O. processBlock() picks up the new bank through a released/acquired
-        atomic pointer swap, never touching the old unique_ptr while the audio
+        atomic pointer swap, never touching the old loader while the audio
         thread might still be reading it.
     */
     void loadSoundFont (const juce::File& file);
@@ -295,8 +295,8 @@ private:
         float outputGain = 1.0f;
     };
 
-    void dispatchMidiMessage (const juce::MidiMessage&, SF2Loader&) noexcept;
-    void dispatchUiNote (const UiNoteEvent&, SF2Loader&) noexcept;
+    void dispatchMidiMessage (const juce::MidiMessage&, const SF2Loader&) noexcept;
+    void dispatchUiNote (const UiNoteEvent&, const SF2Loader&) noexcept;
     void renderRange (juce::AudioBuffer<float>&, int start, int count) noexcept;
     void syncBlockParameters() noexcept;
     static constexpr int maxBanks = 4;
@@ -309,11 +309,11 @@ private:
 
     // Multi-bank SoundFont storage. Each slot holds its own SF2Loader.
     // activeLoader_ always points to the active slot's loader for the audio thread.
-    std::array<std::unique_ptr<SF2Loader>, maxBanks> sf2Loaders_;
+    std::array<std::shared_ptr<const SF2Loader>, maxBanks> sf2Loaders_;
     std::array<juce::String, maxBanks> bankNames_;
     std::atomic<int> activeBankSlot_ { 0 };
-    std::atomic<SF2Loader*> activeLoader_ { nullptr };
-    std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
+    std::atomic<const SF2Loader*> activeLoader_ { nullptr };
+    std::vector<std::shared_ptr<const SF2Loader>> retiredLoaders_;
 
     // Bank generation counters: incremented on each successful loadSoundFont()
     std::array<std::atomic<std::uint32_t>, maxBanks> bankGeneration_ {};
