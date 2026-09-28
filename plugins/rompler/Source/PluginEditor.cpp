@@ -8,6 +8,19 @@ namespace aod
 
 namespace
 {
+constexpr float kSkinDesignWidth = 1563.0f;
+constexpr float kSkinDesignHeight = 1006.0f;
+constexpr float kSkinAspectRatio = kSkinDesignWidth / kSkinDesignHeight;
+constexpr int kSkinMinimumWidth = 960;
+constexpr int kSkinMinimumHeight = 618;
+constexpr int kSkinMaximumWidth = 2345;
+constexpr int kSkinMaximumHeight = 1509;
+constexpr float kLegacyAspectRatio = 1120.0f / 900.0f;
+constexpr int kLegacyMinimumWidth = 720;
+constexpr int kLegacyMinimumHeight = 579;
+constexpr int kLegacyMaximumWidth = 2240;
+constexpr int kLegacyMaximumHeight = 1800;
+
 // A few tiny paint helpers keep the hardware treatment consistent without
 // introducing a global LookAndFeel or changing any control interaction.
 void addBrushedGrain (juce::Graphics& g, juce::Rectangle<float> area, int seed);
@@ -180,6 +193,24 @@ void SectionBox::paint (juce::Graphics& g)
 void HardwareButton::paintButton (juce::Graphics& g, bool isMouseOverButton, bool isButtonDown)
 {
     const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
+
+    if (skinMode_)
+    {
+        // The faceplate already renders the button; draw only interaction
+        // feedback so the hit target stays discoverable.
+        if (isButtonDown)
+        {
+            g.setColour (theme::mint.withAlpha (0.22f));
+            g.fillRoundedRectangle (bounds, 6.0f);
+        }
+        if (isMouseOverButton || isButtonDown)
+        {
+            g.setColour (theme::mintGlow.withAlpha (isButtonDown ? 0.75f : 0.45f));
+            g.drawRoundedRectangle (bounds.reduced (0.5f), 5.0f, 1.1f);
+        }
+        return;
+    }
+
     const float press = isButtonDown ? 1.0f : 0.0f;
     g.setColour (juce::Colour (0xaa000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 2.0f), 5.0f);
@@ -251,6 +282,13 @@ Knob::~Knob()
     param_.removeListener (this);
 }
 
+void Knob::setSkinMode (bool on)
+{
+    skinMode_ = on;
+    name_.setVisible (! on);
+    repaint();
+}
+
 void Knob::syncFromParameter()
 {
     const auto& range = param_.getNormalisableRange();
@@ -296,13 +334,22 @@ void Knob::setReadoutVisible (bool shouldBeVisible)
         return;
 
     readoutVisible_ = shouldBeVisible;
-    value_.setText (slider_.getTextFromValue (slider_.getValue()), juce::dontSendNotification);
-    value_.setVisible (shouldBeVisible);
+    if (! skinMode_)
+    {
+        value_.setText (slider_.getTextFromValue (slider_.getValue()), juce::dontSendNotification);
+        value_.setVisible (shouldBeVisible);
+    }
     repaint();
 }
 
 void Knob::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        paintSkin (g);
+        return;
+    }
+
     const float w = (float) getWidth();
     const float h = (float) getHeight();
     const float capDiameter = std::min (50.0f, std::max (24.0f, std::min (w - 12.0f, h - 30.0f)));
@@ -462,6 +509,74 @@ void Knob::paint (juce::Graphics& g)
     value_.setText (slider_.getTextFromValue (slider_.getValue()), juce::dontSendNotification);
 }
 
+void Knob::paintSkin (juce::Graphics& g)
+{
+    const float w = (float) getWidth();
+    const float h = (float) getHeight();
+    const auto centre = juce::Point<float> (w * 0.5f, h * 0.5f);
+    const float half = std::min (w, h) * 0.5f;
+    const float capR = half * 0.70f;
+    const float ringR = half * 0.86f;
+    const float unit = juce::jlimit (0.0f, 1.0f,
+        static_cast<float> (param_.convertTo0to1 (static_cast<float> (slider_.getValue()))));
+    const auto accent = hot_ ? theme::hot : theme::mint;
+    const auto activeAccent = atInit_ ? theme::mintGlow : accent;
+
+    // Fill arc on the painted ring: sweeps from the 7:30 minimum stop to the
+    // live position, matching the printed dial's 264-degree scale.
+    const float startDeg = -222.0f;
+    const float sweepDeg = unit * 264.0f;
+    juce::Path fill;
+    fill.addCentredArc (centre.x, centre.y, ringR, ringR, 0.0f,
+                        juce::degreesToRadians (startDeg),
+                        juce::degreesToRadians (startDeg + sweepDeg), true);
+    g.setColour (activeAccent.withAlpha (0.26f));
+    g.strokePath (fill, juce::PathStrokeType (6.0f));
+    g.setColour (activeAccent.withAlpha (0.85f));
+    g.strokePath (fill, juce::PathStrokeType (2.3f));
+
+    const auto range = param_.getNormalisableRange();
+    if (range.start < 0.0f && range.end > 0.0f)
+    {
+        const float detent = juce::degreesToRadians (-90.0f);
+        g.setColour (theme::knobPointer.withAlpha (0.75f));
+        g.fillEllipse (centre.x + std::cos (detent) * (ringR + 4.5f) - 1.6f,
+                       centre.y + std::sin (detent) * (ringR + 4.5f) - 1.6f, 3.2f, 3.2f);
+    }
+
+    // Live pointer line over the printed cap.
+    const float angle = juce::degreesToRadians (startDeg + sweepDeg);
+    const juce::Point<float> a (centre.x + std::cos (angle) * capR * 0.30f,
+                                centre.y + std::sin (angle) * capR * 0.30f);
+    const juce::Point<float> b (centre.x + std::cos (angle) * capR * 0.96f,
+                                centre.y + std::sin (angle) * capR * 0.96f);
+    g.setColour (juce::Colour (0xd8000000));
+    g.drawLine (a.x, a.y + 1.1f, b.x, b.y + 1.1f, 4.4f);
+    g.setColour (hot_ ? juce::Colour (0xfffff0df) : theme::knobPointer);
+    g.drawLine (a.x, a.y, b.x, b.y, 2.1f);
+    g.setColour (activeAccent.withAlpha (0.55f));
+    g.drawLine (a.x, a.y - 0.5f, b.x, b.y - 0.5f, 0.9f);
+    g.setColour (juce::Colour (0x90000000));
+    g.fillEllipse (centre.x - 3.2f, centre.y - 3.2f, 6.4f, 6.4f);
+    g.setColour (theme::knobCapHi.withAlpha (0.40f));
+    g.fillEllipse (centre.x - 1.9f, centre.y - 2.4f, 3.8f, 3.8f);
+
+    // Transient readout: a small lit capsule centred on the cap while the
+    // control is being adjusted.
+    if (readoutVisible_)
+    {
+        const auto text = slider_.getTextFromValue (slider_.getValue());
+        const auto r = juce::Rectangle<float> (centre.x - 36.0f, centre.y - 10.0f, 72.0f, 20.0f);
+        g.setColour (juce::Colour (0xe6081016));
+        g.fillRoundedRectangle (r, 5.0f);
+        g.setColour (activeAccent.withAlpha (0.55f));
+        g.drawRoundedRectangle (r.reduced (0.5f), 4.5f, 0.9f);
+        g.setColour (theme::knobCream);
+        g.setFont (makeDisplayFont (11.5f, true));
+        g.drawText (text, r, juce::Justification::centred);
+    }
+}
+
 void Knob::resized()
 {
     const auto w = getWidth();
@@ -540,7 +655,9 @@ void Switch::resized()
     const int pillW = juce::jlimit (48, w - 8, 96);
     const int top = leds_ ? 2 : 4;
     pill_ = juce::Rectangle<int> (0, top, pillW, leds_ ? 20 : 24).withX ((w - pillW) / 2);
-    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 2 : 4)));
+    // In the led variant the five segments are drawn from pill_.getBottom()+4
+    // down to +20, so the label must sit below them instead of overlapping.
+    label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 22 : 4)));
 }
 
 void Switch::advanceChoice()
@@ -553,8 +670,74 @@ void Switch::advanceChoice()
     repaint();
 }
 
+void Switch::paintSkin (juce::Graphics& g)
+{
+    const auto b = getLocalBounds().toFloat();
+    const int idx = box_.getSelectedItemIndex();
+    const juce::String name = idx >= 0 ? box_.getItemText (idx).toUpperCase()
+                                       : juce::String();
+
+    if (leds_)
+    {
+        // Oversample strip: cover the printed "8X" + LED column and draw the
+        // live choice - one lit LED per factor step (1x..8x -> 1..4).
+        const auto plate = b.reduced (0.5f, 2.0f);
+        g.setColour (juce::Colour (0xe60a121a));
+        g.fillRoundedRectangle (plate, 4.0f);
+        g.setColour (theme::displayOn.withAlpha (0.30f));
+        g.drawRoundedRectangle (plate.reduced (0.5f), 3.6f, 0.7f);
+
+        g.setColour (theme::displayOn);
+        g.setFont (makeDisplayFont (10.5f, true));
+        g.drawText (name, plate.withHeight (20.0f), juce::Justification::centred);
+
+        const int lit = juce::jlimit (0, 4, idx + 1);
+        const float ledR = 4.2f;
+        const float rowH = (plate.getHeight() - 30.0f) / 4.0f;
+        for (int i = 0; i < 4; ++i)
+        {
+            const float cy = plate.getY() + 26.0f + (i + 0.5f) * rowH;
+            const auto r = juce::Rectangle<float> (plate.getCentreX() - ledR, cy - ledR, ledR * 2.0f, ledR * 2.0f);
+            const bool on = i >= (4 - lit);
+            g.setColour (theme::ledOff);
+            g.fillEllipse (r);
+            if (on)
+            {
+                g.setColour (theme::ledMint.withAlpha (0.85f));
+                g.fillEllipse (r.reduced (0.8f));
+                g.setColour (theme::mintGlow.withAlpha (0.30f));
+                g.drawEllipse (r.expanded (1.0f), 0.8f);
+            }
+        }
+        return;
+    }
+
+    // CURVE selector: the painted TUBE and CURVE keys act as one hit zone;
+    // a lit capsule over the CURVE key shows the live choice.
+    const auto capsule = juce::Rectangle<float> (b.getRight() - 92.0f, b.getY() + 7.0f,
+                                                 86.0f, b.getHeight() - 14.0f);
+    g.setColour (juce::Colour (0xe20a121a));
+    g.fillRoundedRectangle (capsule, capsule.getHeight() * 0.5f);
+    juce::ColourGradient capGrad (juce::Colour (0xff2e7ea6), capsule.getTopLeft(),
+                                  juce::Colour (0xff0d3346), capsule.getBottomLeft(), false);
+    g.setGradientFill (capGrad);
+    g.fillRoundedRectangle (capsule.reduced (1.6f), capsule.getHeight() * 0.42f);
+    g.setColour (theme::mintGlow.withAlpha (0.45f));
+    g.drawRoundedRectangle (capsule.reduced (1.0f), capsule.getHeight() * 0.44f, 0.9f);
+    g.setColour (theme::knobCream);
+    g.setFont (makeFont (10.0f, true));
+    g.drawFittedText (name, capsule.reduced (4.0f, 0.0f).toNearestInt(),
+                      juce::Justification::centred, 1, 0.8f);
+}
+
 void Switch::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        paintSkin (g);
+        return;
+    }
+
     auto b = pill_.toFloat();
     // Hardware selector: dark bezel, sunk cavity, then a shallow illuminated
     // rocker.  This keeps seafoam as a backlight rather than a web-button fill.
@@ -610,9 +793,8 @@ void Switch::paint (juce::Graphics& g)
     }
 
     const int idx = box_.getSelectedItemIndex();
-    juce::String name = (idx >= 0 && idx + 1 <= box_.getNumItems())
-                        ? box_.getItemText (idx + 1).toUpperCase()
-                        : juce::String();
+    juce::String name = idx >= 0 ? box_.getItemText (idx).toUpperCase()
+                               : juce::String();
     g.setColour (theme::knobCream);
     g.setFont (makeFont (10.0f, true));
     g.drawText (name, b, juce::Justification::centred);
@@ -686,6 +868,20 @@ void Toggle::paint (juce::Graphics& g)
 {
     const auto b = getLocalBounds().toFloat();
     const int idx = box_.getSelectedItemIndex();
+
+    if (skinMode_)
+    {
+        // Highlight the half of the painted PRE/POST pill that matches the
+        // selection; the printed labels show through the translucent glow.
+        const bool on = (idx == 1);
+        auto half = on ? b.withTrimmedLeft (b.getWidth() * 0.5f)
+                       : b.withTrimmedRight (b.getWidth() * 0.5f);
+        g.setColour (theme::mint.withAlpha (0.16f));
+        g.fillRoundedRectangle (half.reduced (2.0f, 6.0f), 8.0f);
+        g.setColour (theme::mintGlow.withAlpha (0.55f));
+        g.drawRoundedRectangle (half.reduced (2.5f, 6.5f), 7.5f, 0.9f);
+        return;
+    }
 
     const float trackW = 44.0f;
     const float trackH = 20.0f;
@@ -831,6 +1027,22 @@ void PitchWheel::resized()
 
 void PitchWheel::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        // Position marker over the painted wheel slot: a bright line plus a
+        // soft glow at the carriage point, centre-detent tick included.
+        const float fillFraction = (value_ + 1.0f) * 0.5f;
+        const auto slot = getLocalBounds().toFloat().reduced (12.0f, 14.0f);
+        const float cy = slot.getBottom() - fillFraction * slot.getHeight();
+        g.setColour (theme::mint.withAlpha (0.30f));
+        g.drawLine (slot.getX() - 2.0f, cy, slot.getRight() + 2.0f, cy, 7.0f);
+        g.setColour (theme::mintGlow);
+        g.drawLine (slot.getX() - 2.0f, cy, slot.getRight() + 2.0f, cy, 2.2f);
+        g.setColour (theme::knobCream.withAlpha (0.5f));
+        g.drawLine (slot.getX() - 3.0f, slot.getCentreY(), slot.getRight() + 3.0f, slot.getCentreY(), 0.8f);
+        return;
+    }
+
     auto track = getLocalBounds().toFloat().withTrimmedBottom (16.0f).reduced (14.0f, 4.0f);
     // fillFraction in [0,1] maps value_ in [-1,1], centred at 0.5.
     const float fillFraction = (value_ + 1.0f) * 0.5f;
@@ -895,6 +1107,17 @@ void ModWheel::resized()
 
 void ModWheel::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        const auto slot = getLocalBounds().toFloat().reduced (12.0f, 14.0f);
+        const float cy = slot.getBottom() - value_ * slot.getHeight();
+        g.setColour (theme::mint.withAlpha (0.30f));
+        g.drawLine (slot.getX() - 2.0f, cy, slot.getRight() + 2.0f, cy, 7.0f);
+        g.setColour (theme::mintGlow);
+        g.drawLine (slot.getX() - 2.0f, cy, slot.getRight() + 2.0f, cy, 2.2f);
+        return;
+    }
+
     auto track = getLocalBounds().toFloat().withTrimmedBottom (16.0f).reduced (14.0f, 4.0f);
     paintWheelSlot (g, track, value_, false, theme::ledMint);
 }
@@ -984,6 +1207,25 @@ void Stepper::paint (juce::Graphics& g)
     const auto b = getLocalBounds().toFloat();
     const int value = juce::roundToInt (slider_.getValue());
 
+    if (skinMode_)
+    {
+        // Cover the printed digit field with a live LCD showing the value.
+        const auto digits = b.reduced (6.0f, 12.0f).withTrimmedBottom (8.0f);
+        juce::ColourGradient lcdGrad (theme::displayFg, digits.getTopLeft(),
+                                      theme::displayBg, digits.getBottomLeft(), false);
+        g.setColour (juce::Colour (0xcc000000));
+        g.fillRoundedRectangle (digits.translated (0.0f, 1.2f), 4.0f);
+        g.setGradientFill (lcdGrad);
+        g.fillRoundedRectangle (digits, 4.0f);
+        g.setColour (theme::displayOn.withAlpha (0.42f));
+        g.drawRoundedRectangle (digits.reduced (0.5f), 3.5f, 0.75f);
+        g.setColour (theme::displayOn);
+        g.setFont (makeDisplayFont (16.0f, true));
+        g.drawText (juce::String (value).paddedLeft ('0', 2), digits,
+                    juce::Justification::centred);
+        return;
+    }
+
     auto digits = juce::Rectangle<float> ((b.getWidth() - 48.0f) * 0.5f, 2.0f, 48.0f, 28.0f);
     const auto bezel = digits.expanded (2.6f, 2.2f);
     g.setColour (juce::Colour (0xaa000000));
@@ -1057,6 +1299,28 @@ void PeakMeter::setLevel (float level)
 
 void PeakMeter::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        const auto inner = getLocalBounds().toFloat().reduced (1.5f, 3.0f);
+        const float w = inner.getWidth();
+        const float gap = 2.0f;
+        const float ledW = (w - gap * (numSegments - 1)) / (float) numSegments;
+        const int lit = juce::roundToInt (level_ * (float) numSegments);
+        for (int i = 0; i < numSegments; ++i)
+        {
+            auto r = juce::Rectangle<float> (inner.getX() + i * (ledW + gap), inner.getY(), ledW, inner.getHeight());
+            if (i < lit)
+            {
+                const auto colour = (i >= numSegments - 1) ? theme::ledRed
+                                  : (i >= numSegments - 3) ? theme::ledHot
+                                                           : theme::ledMint;
+                g.setColour (colour.withAlpha (0.85f));
+                g.fillRoundedRectangle (r, 1.4f);
+            }
+        }
+        return;
+    }
+
     const auto well = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (juce::Colour (0xa8000000));
     g.fillRoundedRectangle (well.translated (0.0f, 1.1f), 4.0f);
@@ -1110,6 +1374,29 @@ void GainReductionMeter::setReductionDb (float reductionDb)
 
 void GainReductionMeter::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        const auto ledArea = getLocalBounds().toFloat().reduced (1.0f, 2.0f);
+        const float gap = 2.0f;
+        const float ledWidth = (ledArea.getWidth() - gap * (numSegments - 1)) / (float) numSegments;
+        const int lit = juce::jlimit (0, numSegments,
+                                      juce::roundToInt ((reductionDb_ / 24.0f) * (float) numSegments));
+        for (int i = 0; i < numSegments; ++i)
+        {
+            const auto segment = juce::Rectangle<float> (ledArea.getX() + i * (ledWidth + gap),
+                                                          ledArea.getY(), ledWidth, ledArea.getHeight());
+            if (i < lit)
+            {
+                const auto colour = i >= numSegments - 1 ? theme::ledRed
+                                  : i >= numSegments - 3 ? theme::ledHot
+                                                          : theme::ledMint;
+                g.setColour (colour.withAlpha (0.85f));
+                g.fillRoundedRectangle (segment, 1.2f);
+            }
+        }
+        return;
+    }
+
     const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (juce::Colour (0xa8000000));
     g.fillRoundedRectangle (bounds.translated (0.0f, 1.0f), 3.8f);
@@ -1224,6 +1511,24 @@ void Keyboard::setNoteOn (int note, bool on)
 
 void Keyboard::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        // Painted keybed stays visible; pressed keys get a translucent glow.
+        for (const auto& k : keys_)
+        {
+            if (! lit_[k.note])
+                continue;
+            auto r = boundsFor (k).toFloat().reduced (0.75f, 0.0f)
+                                                .withTrimmedTop (k.black ? 4.0f : 5.0f)
+                                                .withTrimmedBottom (k.black ? 2.0f : 3.0f);
+            g.setColour (theme::mint.withAlpha (k.black ? 0.45f : 0.30f));
+            g.fillRoundedRectangle (r, 2.0f);
+            g.setColour (theme::mintGlow.withAlpha (0.85f));
+            g.fillRoundedRectangle (r.withY (r.getBottom() - 3.0f).withHeight (2.0f), 0.8f);
+        }
+        return;
+    }
+
     const auto bed = getLocalBounds().toFloat();
     g.fillAll (juce::Colour (0xff070c11));
     g.setColour (juce::Colour (0xae000000));
@@ -1581,6 +1886,39 @@ juce::Point<float> EnvelopeGraph::pointFor (int stage, juce::Rectangle<float> ar
 
 void EnvelopeGraph::paint (juce::Graphics& g)
 {
+    if (skinMode_)
+    {
+        // Live curve over the painted ENV display: no bezel or screen fill,
+        // just the trace, its glow, and the draggable stage points.  The
+        // inset must match the mouseDown/mouseDrag hit area exactly.
+        auto area = getLocalBounds().toFloat().reduced (10.0f, 4.0f);
+        juce::Path curve;
+        curve.startNewSubPath (pointFor (0, area));
+        curve.lineTo (pointFor (1, area));
+        curve.lineTo (pointFor (2, area));
+        curve.lineTo (pointFor (3, area));
+        g.setColour (theme::mintGlow.withAlpha (0.22f));
+        g.strokePath (curve, juce::PathStrokeType (6.0f, juce::PathStrokeType::curved));
+        g.setColour (theme::displayOn);
+        g.strokePath (curve, juce::PathStrokeType (1.9f, juce::PathStrokeType::curved));
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto p = pointFor (i, area);
+            const bool active = (i == activeStage_);
+            g.setColour (juce::Colour (0x9a000000));
+            g.fillEllipse (p.x - 4.5f, p.y - 3.5f, 9.0f, 9.0f);
+            g.setColour ((active ? theme::hot : theme::knobCream).withAlpha (0.95f));
+            g.fillEllipse (p.x - 3.6f, p.y - 4.2f, 7.2f, 7.2f);
+            if (active)
+            {
+                g.setColour (theme::hot.withAlpha (0.40f));
+                g.drawEllipse (p.x - 7.0f, p.y - 7.0f, 14.0f, 14.0f, 1.2f);
+            }
+        }
+        return;
+    }
+
     auto area = getLocalBounds().toFloat().reduced (10.0f, 4.0f);
     const auto bezel = area.expanded (2.0f);
     g.setColour (juce::Colour (0x96000000));
@@ -1916,34 +2254,51 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     skinMode_ = ! skinImage_.isNull();
     if (skinMode_)
     {
-        // The embedded render owns all visible pixels.  Keep the existing
-        // controls alive for interaction and accessibility, but suppress
-        // their duplicate paint passes.
-        std::array<juce::Component*, 17> overlays {
+        // The faceplate render owns the panel art; every control stays a live
+        // child drawing only its state overlay (pointer, digits, curve,
+        // highlights) at the printed position - the hit map lives in
+        // layoutSkin().
+        for (auto& control : controls_)
+        {
+            if (auto* knob = dynamic_cast<Knob*> (control.get()))      knob->setSkinMode (true);
+            if (auto* sw   = dynamic_cast<Switch*> (control.get()))    sw->setSkinMode (true);
+            if (auto* tg   = dynamic_cast<Toggle*> (control.get()))    tg->setSkinMode (true);
+            if (auto* st   = dynamic_cast<Stepper*> (control.get()))   st->setSkinMode (true);
+        }
+        envGraph_->setSkinMode (true);
+        pitchWheel_->setSkinMode (true);
+        modWheel_->setSkinMode (true);
+        keyboard_.setSkinMode (true);
+        peakMeter_.setSkinMode (true);
+        gainReductionMeter_.setSkinMode (true);
+        loadButton_.setSkinMode (true);
+        presetButton_.setSkinMode (true);
+        keyboard_.setKeyRange (36, 53);   // the painted bed spans 31 whites
+
+        // Legends and panels that the artwork already supplies stay in the
+        // tree (accessibility) but no longer paint.
+        std::array<juce::Component*, 13> decorative {
             &brandTitle_, &brandSub_, &brandSub2_, &presetName_,
             &presetDirtyIndicator_, &voiceBox_, &busBox_, &compBox_,
-            &envBox_, &fxBox_, &compPathLabel_, &gainReductionMeter_,
-            &sfLabel_, &sfDisplay_, &bankDigits_, &loadButton_, &peakMeter_
+            &envBox_, &fxBox_, &compPathLabel_, &sfLabel_, &bankDigits_
         };
-        for (auto* component : overlays)
+        for (auto* component : decorative)
             component->setAlpha (0.0f);
-        presetButton_.setAlpha (0.0f);
-        keyboard_.setAlpha (0.0f);
-        if (bankBrowser_)
-            bankBrowser_->setAlpha (0.0f);
-        if (pitchWheel_)
-            pitchWheel_->setAlpha (0.0f);
-        if (modWheel_)
-            modWheel_->setAlpha (0.0f);
-        for (auto& control : controls_)
-            if (control)
-                control->setAlpha (0.0f);
-        if (envGraph_)
-            envGraph_->setAlpha (0.0f);
+        sfDisplay_.setOpaque (true);   // covers the printed SoundFont name
+        sfDisplay_.setJustificationType (juce::Justification::centred);
     }
 
-    setSize (skinMode_ ? skinImage_.getWidth() : 1120,
-             skinMode_ ? skinImage_.getHeight() : 900);
+    const auto aspectRatio = skinMode_ ? kSkinAspectRatio : kLegacyAspectRatio;
+    setResizable (true, true);
+    setResizeLimits (skinMode_ ? kSkinMinimumWidth : kLegacyMinimumWidth,
+                     skinMode_ ? kSkinMinimumHeight : kLegacyMinimumHeight,
+                     skinMode_ ? kSkinMaximumWidth : kLegacyMaximumWidth,
+                     skinMode_ ? kSkinMaximumHeight : kLegacyMaximumHeight);
+    if (auto* constrainer = getConstrainer())
+        constrainer->setFixedAspectRatio (aspectRatio);
+
+    setSize (skinMode_ ? juce::roundToInt (kSkinDesignWidth) : 1120,
+             skinMode_ ? juce::roundToInt (kSkinDesignHeight) : 900);
 
     startTimerHz (20);
     activePreset_ = processor_.capturePreset();
@@ -1952,6 +2307,28 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
 }
 
 RomplerEditor::~RomplerEditor() = default;
+
+juce::Rectangle<float> RomplerEditor::skinCanvasBounds() const noexcept
+{
+    const auto bounds = getLocalBounds().toFloat();
+    if (bounds.isEmpty())
+        return {};
+
+    const float designWidth = skinMode_ ? kSkinDesignWidth : 1120.0f;
+    const float designHeight = skinMode_ ? kSkinDesignHeight : 900.0f;
+    const float scale = juce::jmin (bounds.getWidth() / designWidth,
+                                    bounds.getHeight() / designHeight);
+    const float width = designWidth * juce::jmax (0.0f, scale);
+    const float height = designHeight * juce::jmax (0.0f, scale);
+    return { bounds.getX() + (bounds.getWidth() - width) * 0.5f,
+             bounds.getY() + (bounds.getHeight() - height) * 0.5f,
+             width, height };
+}
+
+juce::Rectangle<int> RomplerEditor::getSkinCanvasBoundsForTesting() const noexcept
+{
+    return skinCanvasBounds().toNearestInt();
+}
 
 void RomplerEditor::setPresetHeaderDocument (const PresetDocument& document)
 {
@@ -2048,7 +2425,9 @@ void RomplerEditor::paint (juce::Graphics& g)
 {
     if (skinMode_ && ! skinImage_.isNull())
     {
-        g.drawImage (skinImage_, getLocalBounds().toFloat(),
+        g.fillAll (juce::Colour (0xff050808));
+        g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+        g.drawImage (skinImage_, skinCanvasBounds(),
                      juce::RectanglePlacement::stretchToFit);
         return;
     }
@@ -2167,6 +2546,12 @@ void RomplerEditor::paint (juce::Graphics& g)
 
 void RomplerEditor::resized()
 {
+    if (skinMode_)
+    {
+        layoutSkin();
+        return;
+    }
+
     auto b = getLocalBounds().reduced (14);
 
     auto top = b.removeFromTop (58);
@@ -2247,6 +2632,91 @@ void RomplerEditor::resized()
     keybed.removeFromLeft (8);
 
     keyboard_.setBounds (keybed);
+}
+
+void RomplerEditor::layoutSkin()
+{
+    // Hit targets sit on the printed controls of AoiYumeBlueDream.png
+    // (1563 x 1006). Rects are image-space and use the same uniform scale and
+    // centred canvas as the faceplate, so resizing never stretches the art or
+    // moves a control away from its printed target.
+    const auto canvas = skinCanvasBounds();
+    const float scale = canvas.getWidth() / kSkinDesignWidth;
+    const auto R = [&] (int x, int y, int w, int h)
+    {
+        return juce::Rectangle<int> (
+            juce::roundToInt (canvas.getX() + x * scale),
+            juce::roundToInt (canvas.getY() + y * scale),
+            juce::roundToInt (w * scale),
+            juce::roundToInt (h * scale));
+    };
+    const auto place = [&] (int idx, int x, int y, int w, int h)
+    {
+        if (controls_[static_cast<size_t> (idx)])
+            controls_[static_cast<size_t> (idx)]->setBounds (R (x, y, w, h));
+    };
+
+    // VOICE: three large dials, then the TUBE/CURVE keys, FILTER ROUTE,
+    // POLYPHONY and the LEGATO pill beside the moon panel.
+    place (0,  473, 74, 132, 132);   // DRIVE
+    place (2,  709, 74, 120, 120);   // VEL > DRIVE
+    place (4,  927, 74, 124, 124);   // FILTER OFFSET
+    place (1,  452, 220, 198, 50);   // TUBE / CURVE keys
+    place (3,  705, 222, 160, 46);   // FILTER ROUTE PRE/POST
+    place (5,  930, 215, 110, 60);   // POLYPHONY digits
+    place (31, 1195, 228, 175, 44);  // LEGATO PRE/POST
+
+    // BUS: oversample strip at the left edge, then the 3 x 2 knob matrix.
+    place (8,  400, 360, 42, 176);   // 1x/2x/4x/8x
+    place (6,  444, 351, 72, 72);    // TAPE DRIVE
+    place (7,  540, 348, 72, 72);    // FOLD
+    place (29, 634, 346, 72, 72);    // FILTER CUTOFF
+    place (30, 444, 455, 72, 72);    // RESONANCE
+    place (9,  538, 454, 70, 70);    // OUTPUT TRIM
+    place (10, 634, 456, 70, 70);    // OUTPUT MIX
+
+    // COMP: 3 x 2 knob matrix with the GR strip in the title edge.
+    place (21, 776, 350, 78, 78);    // THRESHOLD
+    place (22, 879, 348, 70, 70);    // RATIO
+    place (23, 972, 348, 70, 70);    // ATTACK
+    place (24, 780, 459, 70, 70);    // RELEASE
+    place (25, 875, 453, 70, 70);    // MAKEUP
+    place (26, 970, 454, 70, 70);    // COMP MIX
+    gainReductionMeter_.setBounds (R (952, 318, 115, 16));
+
+    // ENV: painted curve display, then the four stage knobs.
+    envGraph_->setBounds (R (1095, 332, 425, 122));
+    place (17, 1108, 462, 68, 68);   // ATTACK
+    place (18, 1207, 461, 68, 68);   // DECAY
+    place (19, 1315, 467, 68, 68);   // SUSTAIN
+    place (20, 1426, 460, 68, 68);   // RELEASE
+
+    // FX rail: eight printed knobs map to the eight FX parameters.  The
+    // painted PING-PONG DELAY knob at x~1117 has no matching parameter and
+    // stays decorative.
+    place (11, 272, 650, 68, 68);    // CHORUS RATE
+    place (12, 409, 650, 68, 68);    // CHORUS DEPTH
+    place (13, 542, 652, 68, 68);    // CHORUS MIX
+    place (14, 699, 652, 68, 68);    // REVERB ROOM
+    place (15, 844, 652, 68, 68);    // REVERB DAMP
+    place (16, 972, 652, 68, 68);    // REVERB MIX
+    place (28, 1243, 652, 68, 68);   // PING-PONG FEEDBACK
+    place (27, 1376, 652, 68, 68);   // DELAY MIX
+
+    // Dock: live SoundFont name over the printed field, meter strip, LOAD key.
+    sfDisplay_.setBounds (R (335, 776, 420, 42));
+    peakMeter_.setBounds (R (890, 780, 215, 32));
+    loadButton_.setBounds (R (1108, 776, 95, 40));
+
+    // Preset browser covers the printed list; the library opens from the
+    // painted star key beside the search field.
+    bankBrowser_->setBounds (R (42, 138, 328, 398));
+    presetButton_.setBounds (R (322, 543, 48, 36));
+
+    // Wheels and the keybed along the bottom edge.
+    pitchWheel_->setBounds (R (48, 672, 58, 170));
+    modWheel_->setBounds (R (122, 672, 58, 170));
+    keyboard_.setBounds (R (207, 837, 1320, 140));
 }
 
 void RomplerEditor::layoutVoiceControls (juce::Rectangle<int> area)

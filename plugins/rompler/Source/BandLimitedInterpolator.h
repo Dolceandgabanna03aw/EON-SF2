@@ -58,16 +58,50 @@ public:
         const float phaseMix = phasePosition - static_cast<float> (phase);
         const float* a = kernelAt (lower, phase);
         const float* b = kernelAt (lower, phase + 1);
+        if (position <= 0.0f || lower == upper)
+        {
+            // At <= 1x and at the table's upper edge, rateMix is zero, so the
+            // adjacent bracket contributes nothing. Avoid loading and mixing
+            // its two phase kernels for every tap in these common cases.
+            float sum0 = 0.0f;
+            float sum1 = 0.0f;
+            float sum2 = 0.0f;
+            float sum3 = 0.0f;
+            const auto addTap = [&] (int tap, float& sum)
+            {
+                const float weight = a[tap] + phaseMix * (b[tap] - a[tap]);
+                sum += weight * readAt (tap - kCentreTap);
+            };
+            for (int tap = 0; tap < kNumTaps; tap += 4)
+            {
+                addTap (tap,     sum0);
+                addTap (tap + 1, sum1);
+                addTap (tap + 2, sum2);
+                addTap (tap + 3, sum3);
+            }
+            return (sum0 + sum1) + (sum2 + sum3);
+        }
+
         const float* c = kernelAt (upper, phase);
         const float* d = kernelAt (upper, phase + 1);
-        float sum = 0.0f;
-        for (int tap = 0; tap < kNumTaps; ++tap)
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        float sum2 = 0.0f;
+        float sum3 = 0.0f;
+        const auto addTap = [&] (int tap, float& sum)
         {
             const float low = a[tap] + phaseMix * (b[tap] - a[tap]);
             const float high = c[tap] + phaseMix * (d[tap] - c[tap]);
             sum += (low + rateMix * (high - low)) * readAt (tap - kCentreTap);
+        };
+        for (int tap = 0; tap < kNumTaps; tap += 4)
+        {
+            addTap (tap,     sum0);
+            addTap (tap + 1, sum1);
+            addTap (tap + 2, sum2);
+            addTap (tap + 3, sum3);
         }
-        return sum;
+        return (sum0 + sum1) + (sum2 + sum3);
     }
 
     /**

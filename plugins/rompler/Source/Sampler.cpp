@@ -1,5 +1,6 @@
 #include "Sampler.h"
 #include "BandLimitedInterpolator.h"
+#include "SF2Loader.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -13,6 +14,23 @@ namespace
     // or user-configurable per the spec; a gentle ~5.5 Hz reads as natural
     // vocal/string-style vibrato without sounding like a tremolo effect.
     constexpr float kVibratoRateHz = 5.5f;
+
+    // Lane layout for the synthetic stereo spread, indexed by voice slot.
+    // Lane 0 stays in the centre, so the first voice of a fresh phrase (which
+    // always takes the lowest idle slot) remains dual-mono. The remaining lanes
+    // alternate in mirrored pairs, which keeps the position set exactly
+    // left/right balanced, and their magnitude never exceeds 0.5 so the widest
+    // lane still cannot saturate against the pan clamp at full width.
+    constexpr std::array<float, 9> kStereoVoicePositions {
+        0.0f, -0.30f, 0.30f, -0.48f, 0.48f, -0.14f, 0.14f, -0.38f, 0.38f
+    };
+
+    constexpr float kEqualPowerHalfPi = juce::MathConstants<float>::halfPi;
+    // Equal power passes through 1/sqrt(2) at the centre. Scaling by sqrt(2)
+    // keeps a centred voice at unity in both channels, so width zero reproduces
+    // the legacy dual-mono signal exactly and every lane carries the same total
+    // power (left^2 + right^2) regardless of where it sits in the image.
+    constexpr float kEqualPowerUnityScale = juce::MathConstants<float>::sqrt2;
 }
 
 double Voice::computePlayRate(const Sample* sample, int midiNote) const noexcept
@@ -23,9 +41,37 @@ double Voice::computePlayRate(const Sample* sample, int midiNote) const noexcept
     return std::pow (2.0, semitones / 12.0);
 }
 
-void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
+Voice::~Voice()
 {
+    detachSample();
+}
+
+void Voice::bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept
+{
+    const auto* previousOwner = sampleOwner_;
+    if (sampleOwner != previousOwner && sampleOwner != nullptr)
+        sampleOwner->retainVoiceSample();
+
     sample_ = sample;
+    sampleOwner_ = sampleOwner;
+
+    if (sampleOwner != previousOwner && previousOwner != nullptr)
+        previousOwner->releaseVoiceSample();
+}
+
+void Voice::detachSample() noexcept
+{
+    const auto* previousOwner = sampleOwner_;
+    sample_ = nullptr;
+    sampleOwner_ = nullptr;
+    if (previousOwner != nullptr)
+        previousOwner->releaseVoiceSample();
+}
+
+void Voice::start(const Sample* sample, int midiNote, float velocity,
+                  const SF2Loader* sampleOwner) noexcept
+{
+    bindSample (sample, sampleOwner);
     velocity_ = velocity;
     midiNote_ = midiNote;
     phase_ = 0.0;
@@ -54,7 +100,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     adsr_.noteOn();
 }
 
-void Voice::retarget(const Sample* sample, int midiNote) noexcept
+void Voice::retarget(const Sample* sample, int midiNote, const SF2Loader* sampleOwner) noexcept
 {
     if (!active_)
         return;
@@ -71,7 +117,7 @@ void Voice::retarget(const Sample* sample, int midiNote) noexcept
         hasLoopWrapped_ = false;
     }
 
-    sample_ = sample;
+    bindSample (sample, sampleOwner);
     midiNote_ = midiNote;
     playRate_ = computePlayRate (sample, midiNote);
 }
@@ -80,7 +126,7 @@ void Voice::retire() noexcept
 {
     active_ = false;
     midiNote_ = -1;
-    sample_ = nullptr;
+    detachSample();
     envelopeLevel_ = 0.0f;
 }
 
@@ -111,11 +157,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     if (sample_ == nullptr || sample_->data.empty())
     {
         active_ = false;
+        detachSample();
         envelopeLevel_ = 0.0f;
         return;
     }
 
-    if (filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate)
+    const bool filterNeedsPrepare = filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate;
+    if (filterNeedsPrepare)
     {
         filter_.prepare (static_cast<double> (hostSampleRate));
         filterSampleRate_ = hostSampleRate;
@@ -125,6 +173,25 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // mid-Release every block would restart the ramp from the current
         // level, stretching what should be a fixed-time fade indefinitely.
         adsr_.prepare (static_cast<double> (hostSampleRate));
+    }
+
+    std::uint32_t filterOffsetBits = 0;
+    static_assert (sizeof (filterOffsetBits) == sizeof (filterOffsetCents),
+                   "expected 32-bit float");
+    std::memcpy (&filterOffsetBits, &filterOffsetCents, sizeof (filterOffsetBits));
+    const bool filterParametersChanged = filterNeedsPrepare || ! filterParametersCached_
+        || filterParameterSample_ != sample_
+        || filterParameterOffsetBits_ != filterOffsetBits;
+    if (filterParametersChanged)
+    {
+        const float cutoffHz = std::clamp (
+            sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
+            20.0f, static_cast<float> (hostSampleRate) * 0.49f);
+        const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
+        filter_.setCutoff (cutoffHz, q);
+        filterParameterSample_ = sample_;
+        filterParameterOffsetBits_ = filterOffsetBits;
+        filterParametersCached_ = true;
     }
 
     // Push ADSR parameters only on change: the setters recompute the current
@@ -148,12 +215,6 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         adsr_.setReleaseSec (releaseMs * 0.001f);
     }
 
-    const float cutoffHz = std::clamp (
-        sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
-        20.0f, static_cast<float> (hostSampleRate) * 0.49f);
-    const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
-    filter_.setCutoff (cutoffHz, q);
-
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
 
@@ -168,6 +229,32 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         driveNeedsReset_ = false;
     }
     driveDbSmooth_.setTargetValue (velDriveDb);
+
+    const bool driveIsSmoothing = driveDbSmooth_.isSmoothing();
+    const float steadyDriveDb = driveDbSmooth_.getCurrentValue();
+    const auto driveBlendForDb = [] (float dbValue) noexcept
+    {
+        const float position = std::clamp (std::abs (dbValue), 0.0f, 1.0f);
+        return position * position * (3.0f - 2.0f * position);
+    };
+    if (! driveIsSmoothing)
+    {
+        std::uint32_t driveDbBits = 0;
+        static_assert (sizeof (driveDbBits) == sizeof (steadyDriveDb),
+                       "expected 32-bit float");
+        std::memcpy (&driveDbBits, &steadyDriveDb, sizeof (driveDbBits));
+        if (! steadyDriveCacheValid_ || steadyDriveDbBits_ != driveDbBits)
+        {
+            steadyDriveDbBits_ = driveDbBits;
+            steadyDriveBlend_ = driveBlendForDb (steadyDriveDb);
+            steadyDriveGain_ = steadyDriveBlend_ > 0.0f
+                ? std::pow (10.0f, steadyDriveDb / 20.0f)
+                : 1.0f;
+            steadyDriveCacheValid_ = true;
+        }
+    }
+    const float steadyDriveBlend = driveIsSmoothing ? 0.0f : steadyDriveBlend_;
+    const float steadyDriveGain = driveIsSmoothing ? 1.0f : steadyDriveGain_;
 
     // Loop points as sample-frame indices into sampleData. While looping, phase_
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
@@ -185,6 +272,11 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     const double fixedRate = playRate_ * std::pow (2.0, static_cast<double> (pitchBendSemitones) / 12.0);
     const float fixedPosition = interpolator.positionForRate (fixedRate);
+    // positionForRate is linear in log2(rate). Vibrato is additive in
+    // semitones, so its table coordinate is an additive offset as well.
+    const double fixedLog2Rate = vibratoDepthCents != 0.0f ? std::log2 (fixedRate) : 0.0;
+    constexpr double rateBracketScale =
+        static_cast<double> (BandLimitedInterpolator::kNumRateBrackets - 1) / 4.0;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -193,6 +285,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         if (env <= 0.0f && !adsr_.isActive())
         {
             active_ = false;
+            detachSample();
             envelopeLevel_ = 0.0f;
             break;
         }
@@ -203,12 +296,12 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // resetting the cached rate (which would otherwise jump the read
         // phase).
         double effectiveRate = fixedRate;
+        float vibratoSemitones = 0.0f;
         if (vibratoDepthCents != 0.0f)
         {
-            const float vibratoSemitones =
+            vibratoSemitones =
                 (vibratoDepthCents * static_cast<float> (std::sin (vibratoPhase_))) / 100.0f;
-            effectiveRate = playRate_ * std::pow (2.0,
-                (static_cast<double> (pitchBendSemitones) + static_cast<double> (vibratoSemitones)) / 12.0);
+            effectiveRate = fixedRate * std::exp2 (static_cast<double> (vibratoSemitones) / 12.0);
         }
 
         if (!looping)
@@ -227,6 +320,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
                 else
                 {
                     active_ = false;
+                    detachSample();
                     envelopeLevel_ = 0.0f;
                     break;
                 }
@@ -241,7 +335,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // sinc table band-limits the read for the rate actually being played;
         // taps wrap inside an active loop so the seam stays continuous, and
         // clamp at the ends so a one-shot never reads outside its buffer.
-        const float position = vibratoDepthCents != 0.0f ? interpolator.positionForRate (effectiveRate) : fixedPosition;
+        const float position = vibratoDepthCents != 0.0f
+            ? (effectiveRate > 1.0
+                ? static_cast<float> (std::clamp (
+                    (fixedLog2Rate + static_cast<double> (vibratoSemitones) / 12.0) * rateBracketScale,
+                    0.0, static_cast<double> (BandLimitedInterpolator::kNumRateBrackets - 1)))
+                : 0.0f)
+            : fixedPosition;
         // Interior kernels never need edge clamps or loop modulo per tap.
         // Keep the guarded reader for the sample head, tail, and loop seams.
         const auto firstTap = index - BandLimitedInterpolator::kCentreTap;
@@ -281,12 +381,17 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             sample = filter_.process (sample);
 
         // Apply nonlinear drive based on curve ID
-        const float currentDriveDb = driveDbSmooth_.getNextValue();
-        const float driveBlendPosition = std::clamp (std::abs (currentDriveDb), 0.0f, 1.0f);
-        const float driveBlend = driveBlendPosition * driveBlendPosition * (3.0f - 2.0f * driveBlendPosition);
+        const float currentDriveDb = driveIsSmoothing
+            ? driveDbSmooth_.getNextValue()
+            : steadyDriveDb;
+        const float driveBlend = driveIsSmoothing
+            ? driveBlendForDb (currentDriveDb)
+            : steadyDriveBlend;
         if (driveBlend > 0.0f)
         {
-            const float driveGain = std::pow (10.0f, currentDriveDb / 20.0f);
+            const float driveGain = driveIsSmoothing
+                ? std::pow (10.0f, currentDriveDb / 20.0f)
+                : steadyDriveGain;
             const float driven = driveGain * sample;
             float coloured = sample;
             if (curveId == 1)
@@ -383,6 +488,17 @@ void VoicePool::setPolyphony(int numVoices) noexcept
     polyphony_ = newLimit;
 }
 
+void VoicePool::prepare(int maximumExpectedSamplesPerBlock)
+{
+    if (maximumExpectedSamplesPerBlock <= 0)
+    {
+        stereoScratch_.clear();
+        return;
+    }
+
+    stereoScratch_.assign (static_cast<std::size_t> (maximumExpectedSamplesPerBlock), 0.0f);
+}
+
 void VoicePool::setSustainHeld(bool held) noexcept
 {
     if (sustainHeld_ == held)
@@ -409,7 +525,8 @@ void VoicePool::setLegatoEnabled(bool enabled) noexcept
     legatoEnabled_ = enabled;
 }
 
-void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept
+void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
+                           const SF2Loader* sampleOwner) noexcept
 {
     const int voiceIndex = static_cast<int> (&voice - voices_.data());
     const int victimNote = voice.note();
@@ -417,13 +534,14 @@ void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, flo
         && noteToVoice_[static_cast<std::size_t>(victimNote)] == voiceIndex)
         noteToVoice_[static_cast<std::size_t>(victimNote)] = -1;
 
-    voice.start (sample, midiNote, velocity);
+    voice.start (sample, midiNote, velocity, sampleOwner);
     voice.setStartSequence (nextStartSequence_++);
     noteToVoice_[static_cast<std::size_t>(midiNote)] = voiceIndex;
     leadVoiceIndex_ = voiceIndex;
 }
 
-void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexcept
+void VoicePool::start(const Sample* sample, int midiNote, float velocity,
+                      const SF2Loader* sampleOwner) noexcept
 {
     if (midiNote < 0 || midiNote >= 128)
         return;
@@ -451,7 +569,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
     {
         Voice& lead = voices_[static_cast<std::size_t>(leadVoiceIndex_)];
         const int previousNote = lead.note();
-        lead.retarget (sample, midiNote);
+        lead.retarget (sample, midiNote, sampleOwner);
         if (previousNote >= 0 && previousNote < 128 && previousNote != midiNote
             && noteToVoice_[static_cast<std::size_t>(previousNote)] == leadVoiceIndex_)
             noteToVoice_[static_cast<std::size_t>(previousNote)] = -1;
@@ -467,7 +585,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         && voices_[static_cast<std::size_t>(existing)].note() == midiNote
         && voices_[static_cast<std::size_t>(existing)].isActive())
     {
-        startVoice (voices_[static_cast<std::size_t>(existing)], sample, midiNote, velocity);
+        startVoice (voices_[static_cast<std::size_t>(existing)], sample, midiNote, velocity, sampleOwner);
         return;
     }
 
@@ -475,7 +593,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
     if (voice == nullptr)
         return;
 
-    startVoice (*voice, sample, midiNote, velocity);
+    startVoice (*voice, sample, midiNote, velocity, sampleOwner);
 }
 
 void VoicePool::stop(int midiNote) noexcept
@@ -612,6 +730,72 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
                     && noteToVoice_[static_cast<std::size_t>(note)] == static_cast<int>(i))
                     noteToVoice_[static_cast<std::size_t>(note)] = -1;
             }
+        }
+}
+
+VoicePool::StereoGains VoicePool::stereoGainsForVoice (std::size_t voiceIndex, float width) noexcept
+{
+    const float safeWidth = juce::jlimit (0.0f, 1.0f, width);
+    const float position = kStereoVoicePositions[voiceIndex % kStereoVoicePositions.size()];
+    const float pan = juce::jlimit (0.0f, 1.0f, 0.5f + position * safeWidth);
+
+    return { kEqualPowerUnityScale * std::sin ((1.0f - pan) * kEqualPowerHalfPi),
+             kEqualPowerUnityScale * std::sin (pan * kEqualPowerHalfPi) };
+}
+
+void VoicePool::renderStereo(float* outputLeft, float* outputRight, int numSamples,
+                             int hostSampleRate, float driveDb, float velToDriveDb,
+                             int curveId, int filterRouting, float filterOffsetCents,
+                             float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                             float pitchBendSemitones, float vibratoDepthCents,
+                             float stereoWidth) noexcept
+{
+    if (outputLeft == nullptr || numSamples <= 0)
+        return;
+
+    // A mono host, an unprepared pool, or an unexpectedly oversized host block
+    // must remain safe. The fallback deliberately preserves the old dual-mono
+    // behaviour instead of allocating in the real-time path. A zero or negative
+    // width is not a fallback case: it is a normal render whose every lane
+    // collapses to the centre, so the two paths stay continuous at the origin.
+    if (outputRight == nullptr || outputRight == outputLeft
+        || stereoScratch_.size() < static_cast<std::size_t> (numSamples)
+        || ! std::isfinite (stereoWidth))
+    {
+        render (outputLeft, numSamples, hostSampleRate, driveDb, velToDriveDb,
+                curveId, filterRouting, filterOffsetCents,
+                attackMs, decayMs, sustainLevel, releaseMs,
+                pitchBendSemitones, vibratoDepthCents);
+        if (outputRight != nullptr && outputRight != outputLeft)
+            juce::FloatVectorOperations::copy (outputRight, outputLeft, numSamples);
+        return;
+    }
+
+    std::fill (outputLeft, outputLeft + numSamples, 0.0f);
+    std::fill (outputRight, outputRight + numSamples, 0.0f);
+
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+    for (std::size_t i = 0; i < limit; ++i)
+        if (voices_[i].isActive())
+        {
+            auto* scratch = stereoScratch_.data();
+            std::fill (scratch, scratch + numSamples, 0.0f);
+            voices_[i].render (scratch, numSamples, hostSampleRate, driveDb, velToDriveDb,
+                               curveId, filterRouting, filterOffsetCents,
+                               attackMs, decayMs, sustainLevel, releaseMs,
+                               pitchBendSemitones, vibratoDepthCents, *interpolator_);
+
+            if (! voices_[i].isActive())
+            {
+                const int note = voices_[i].note();
+                if (note >= 0 && note < 128
+                    && noteToVoice_[static_cast<std::size_t> (note)] == static_cast<int> (i))
+                    noteToVoice_[static_cast<std::size_t> (note)] = -1;
+            }
+
+            const auto gains = stereoGainsForVoice (i, stereoWidth);
+            juce::FloatVectorOperations::addWithMultiply (outputLeft, scratch, gains.left, numSamples);
+            juce::FloatVectorOperations::addWithMultiply (outputRight, scratch, gains.right, numSamples);
         }
 }
 

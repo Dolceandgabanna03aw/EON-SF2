@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cmath>
+#include <thread>
 
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
@@ -187,6 +188,67 @@ TEST_CASE ("all notes off controller releases active voices", "[plugin][midi]")
     processor.releaseResources();
 }
 
+TEST_CASE ("CC65 legato persists across blocks until host automation wins", "[plugin][midi][legato]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+    processor.loadSoundFont (testSf2File());
+
+    juce::AudioBuffer<float> buffer (2, kBlockSize);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 65, 127), 0);
+    processor.processBlock (buffer, midi);
+    REQUIRE (processor.isLegatoEnabled());
+
+    // Regression guard: before the deferred host mirror existed, the next
+    // block's parameter sync restored the APVTS value and dropped CC65.
+    for (int block = 0; block < 8; ++block)
+    {
+        midi.clear();
+        processor.processBlock (buffer, midi);
+        REQUIRE (processor.isLegatoEnabled());
+    }
+
+    // After the deferred mirror lands on the message thread, the parameter
+    // agrees with the controller and legato still holds.
+    processor.drainDeferredWorkForTesting();
+    const auto* legatoParam = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::voiceLegato);
+    REQUIRE (legatoParam != nullptr);
+    REQUIRE (static_cast<int> (legatoParam->load()) == 1);
+    for (int block = 0; block < 4; ++block)
+    {
+        midi.clear();
+        processor.processBlock (buffer, midi);
+        REQUIRE (processor.isLegatoEnabled());
+    }
+
+    // The release half of the controller persists the same way.
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 65, 0), 0);
+    processor.processBlock (buffer, midi);
+    processor.drainDeferredWorkForTesting();
+    for (int block = 0; block < 4; ++block)
+    {
+        midi.clear();
+        processor.processBlock (buffer, midi);
+        REQUIRE_FALSE (processor.isLegatoEnabled());
+    }
+
+    // Once the controller mirror has landed, host automation wins again.
+    auto* param = processor.getValueTreeState().getParameter (aod::ParamIDs::voiceLegato);
+    REQUIRE (param != nullptr);
+    param->setValueNotifyingHost (1.0f);
+    midi.clear();
+    processor.processBlock (buffer, midi);
+    REQUIRE (processor.isLegatoEnabled());
+
+    processor.releaseResources();
+}
+
 TEST_CASE ("the processor declares an instrument bus layout", "[plugin][smoke]")
 {
     aod::RomplerProcessor processor;
@@ -349,4 +411,86 @@ TEST_CASE ("state survives a save and restore round trip", "[plugin][smoke]")
     REQUIRE (std::abs (curve->getValue() - savedCurve) < 1.0e-5f);
     REQUIRE (std::abs (compressorRatio->getValue() - savedCompressorRatio) < 1.0e-5f);
     REQUIRE (std::abs (compressorMix->getValue() - savedCompressorMix) < 1.0e-5f);
+}
+
+TEST_CASE ("SoundFont cache reuses only matching file identities and rates", "[plugin][sf2-cache]")
+{
+    const auto file = testSf2File();
+    if (! file.existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    auto first = aod::SF2Loader::loadCached (file, 48000);
+    REQUIRE (first != nullptr);
+    REQUIRE (aod::SF2Loader::loadCached (file, 48000) == first);
+
+    auto otherRate = aod::SF2Loader::loadCached (file, 44100);
+    REQUIRE (otherRate != nullptr);
+    REQUIRE (otherRate != first);
+
+    juce::TemporaryFile temporaryFile;
+    REQUIRE (file.copyFileTo (temporaryFile.getFile()));
+    auto otherFile = aod::SF2Loader::loadCached (temporaryFile.getFile(), 48000);
+    REQUIRE (otherFile != nullptr);
+    REQUIRE (otherFile != first);
+
+    const auto changedTime = temporaryFile.getFile().getLastModificationTime()
+                                 + juce::RelativeTime::seconds (10.0);
+    REQUIRE (temporaryFile.getFile().setLastModificationTime (changedTime));
+    auto changedFile = aod::SF2Loader::loadCached (temporaryFile.getFile(), 48000);
+    REQUIRE (changedFile != nullptr);
+    REQUIRE (changedFile != otherFile);
+}
+
+TEST_CASE ("prepare cycles reuse samples but advance bank generations", "[plugin][sf2-cache]")
+{
+    const auto file = testSf2File();
+    if (! file.existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, 48000.0, kBlockSize);
+    processor.prepareToPlay (48000.0, kBlockSize);
+    processor.loadSoundFont (file, 0);
+    const auto* first = processor.getBankLoaderForTesting (0);
+    const auto firstGeneration = processor.getBankGenerationForTesting (0);
+    REQUIRE (first != nullptr);
+
+    processor.releaseResources();
+    REQUIRE (processor.getBankLoaderForTesting (0) == nullptr);
+    processor.prepareToPlay (48000.0, kBlockSize);
+    processor.loadSoundFont (file, 0);
+    REQUIRE (processor.getBankLoaderForTesting (0) == first);
+    REQUIRE (processor.getBankGenerationForTesting (0) == firstGeneration + 1);
+
+    processor.loadSoundFont (file, 1);
+    REQUIRE (processor.getBankLoaderForTesting (1) == first);
+    processor.switchBank (1);
+    REQUIRE (processor.getActiveBankSlot() == 1);
+    processor.removeBank (1);
+    REQUIRE (processor.getBankLoaderForTesting (1) == nullptr);
+    processor.switchBank (0);
+    REQUIRE (processor.getBankLoaderForTesting (0) == first);
+
+    processor.selectPreset (12, 34);
+
+    // Preparing on the message thread reloads inline; exercise the marshalled
+    // path by preparing on a non-message thread, as an audio callback would.
+    std::thread ([&processor] { processor.prepareToPlay (44100.0, kBlockSize); }).join();
+
+    // The rate-mismatched reload is marshalled to the message thread: the
+    // stale loader must still be published until the deferred drain runs.
+    REQUIRE (processor.getBankLoaderForTesting (0) == first);
+    processor.drainDeferredWorkForTesting();
+    REQUIRE (processor.getBankLoaderForTesting (0) != first);
+    REQUIRE (processor.getBankGenerationForTesting (0) == firstGeneration + 2);
+    const auto [restoredBank, restoredProgram] = processor.getCurrentBankProgram();
+    REQUIRE (restoredBank == 12);
+    REQUIRE (restoredProgram == 34);
+
+    processor.releaseResources();
+    processor.prepareToPlay (44100.0, kBlockSize);
+    processor.loadSoundFont (file, 0);
+    REQUIRE (processor.getBankLoaderForTesting (0) != first);
+    REQUIRE (processor.getBankGenerationForTesting (0) == firstGeneration + 3);
+    processor.releaseResources();
 }

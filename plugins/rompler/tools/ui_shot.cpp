@@ -15,13 +15,13 @@
     component into an Image and writes it as a PNG.
 
     Usage:
-        ui_shot <output.png>
+        ui_shot <output.png> [width height]
 */
 int main (int argc, char* argv[])
 {
-    if (argc < 2)
+    if (argc != 2 && argc != 4)
     {
-        std::cerr << "usage: ui_shot <output.png>\n";
+        std::cerr << "usage: ui_shot <output.png> [width height]\n";
         return 2;
     }
 
@@ -36,6 +36,18 @@ int main (int argc, char* argv[])
     {
         std::cerr << "createEditor returned null\n";
         return 1;
+    }
+
+    if (argc == 4)
+    {
+        const int width = juce::String (argv[2]).getIntValue();
+        const int height = juce::String (argv[3]).getIntValue();
+        if (width <= 0 || height <= 0)
+        {
+            std::cerr << "width and height must be positive\n";
+            return 2;
+        }
+        editor->setSize (width, height);
     }
 
     // Let the editor's Timer run a handful of ticks so meter state / labels

@@ -73,6 +73,22 @@ public:
     }
     /** Test-only: synchronously drain the message-thread timer mailbox. */
     void drainDeferredWorkForTesting() { timerCallback(); }
+    /** Test-only: voices currently rendering inside the pool. */
+    [[nodiscard]] int getActiveVoiceCountForTesting() const noexcept
+    {
+        return voicePool_ ? voicePool_->activeVoiceCount() : 0;
+    }
+    /** Test-only: observe loader reuse and generation changes across prepares. */
+    [[nodiscard]] const SF2Loader* getBankLoaderForTesting (int bankSlot) const noexcept
+    {
+        return bankSlot >= 0 && bankSlot < maxBanks
+            ? sf2Loaders_[static_cast<std::size_t> (bankSlot)].get() : nullptr;
+    }
+    [[nodiscard]] std::uint32_t getBankGenerationForTesting (int bankSlot) const noexcept
+    {
+        return bankSlot >= 0 && bankSlot < maxBanks
+            ? bankGeneration_[static_cast<std::size_t> (bankSlot)].load (std::memory_order_relaxed) : 0;
+    }
     /**
         Test-only seam for interleaving a new MIDI CC after timerCallback()
         snapshots a controller mailbox but before it touches APVTS.
@@ -106,7 +122,7 @@ public:
 
         Safe to call from the message thread only: it allocates and does file
         I/O. processBlock() picks up the new bank through a released/acquired
-        atomic pointer swap, never touching the old unique_ptr while the audio
+        atomic pointer swap, never touching the old loader while the audio
         thread might still be reading it.
     */
     void loadSoundFont (const juce::File& file);
@@ -132,10 +148,12 @@ public:
 
     /**
         Loads the SoundFont bundled inside the plugin bundle's Contents/Resources
-        directory, if one is present. Called from prepareToPlay() on the message
-        thread so the plugin starts already usable without a manual Load step.
-        No-op when the bundle has no .sf2 resource (e.g. release builds without
-        the bundled font, the ui_shot tool, the standalone build, or local dev).
+        directory, if one is present. Offered from the message-thread drain that
+        services work deferred out of prepareToPlay(), so the plugin starts
+        already usable without a manual Load step. No-op when slot 0 already
+        holds a bank (e.g. a session restored between prepare and the drain) or
+        when the bundle has no .sf2 resource (release builds without the
+        bundled font, the ui_shot tool, the standalone build, or local dev).
     */
     void loadBundledSoundFont();
 
@@ -220,13 +238,25 @@ private:
         mirrorFilterOffset = 1u << 0,
         mirrorBusCutoff = 1u << 1,
         mirrorLatency = 1u << 2,
-        quickSlot = 1u << 3
+        quickSlot = 1u << 3,
+        mirrorLegato = 1u << 4,
+        reloadBanksForRate = 1u << 5,
+        offerBundledFont = 1u << 6
     };
 
     // The processor is constructed and destroyed on JUCE's message thread.
     // This timer owns all host/UI work deferred from processBlock().
     void timerCallback() override;
-    
+
+    /**
+        Message-thread drain for the bank work prepareToPlay() cannot do on
+        its own thread: re-decode every loaded bank whose loader is still at
+        the previous host rate, then offer the bundled SoundFont. The flag
+        re-arms on every prepare, so the loop converges all slots to the most
+        recently requested rate.
+    */
+    void reloadBanksForPreparedRate();
+
     // Drain and destroy retired SoundFont instances.
     // Safe to call from message thread only; ensures no voice is still
     // referencing samples from the oldest retired loader.
@@ -235,8 +265,10 @@ private:
     void mirrorNormalizedParameter (const char* parameterId, float normalizedValue);
     std::atomic<unsigned int> pendingAsyncFlags_ { 0 };
     std::atomic<int> pendingQuickSlot_ { 0 };
+    std::atomic<int> pendingBankReloadRate_ { 0 };
     std::atomic<float> pendingFilterOffsetNormalized_ { 0.5f };
     std::atomic<float> pendingBusCutoffNormalized_ { 1.0f };
+    std::atomic<float> pendingLegatoNormalized_ { 0.0f };
     // The audio thread uses each generation as a seqlock: odd while it writes
     // the snapshot, even when stable. A captured MIDI CC is authoritative
     // until its deferred APVTS mirror is sent; JUCE's public parameter API has
@@ -245,6 +277,8 @@ private:
     std::atomic<std::uint64_t> filterOffsetMirroredGeneration_ { 0 };
     std::atomic<std::uint64_t> busCutoffCcGeneration_ { 0 };
     std::atomic<std::uint64_t> busCutoffMirroredGeneration_ { 0 };
+    std::atomic<std::uint64_t> legatoCcGeneration_ { 0 };
+    std::atomic<std::uint64_t> legatoMirroredGeneration_ { 0 };
     static constexpr int maxControllerMirrorAttempts = 4;
     std::function<void()> beforeControllerMirrorForTesting_;
     std::atomic<int> pendingLatencySamples_ { -1 };
@@ -295,8 +329,8 @@ private:
         float outputGain = 1.0f;
     };
 
-    void dispatchMidiMessage (const juce::MidiMessage&, SF2Loader&) noexcept;
-    void dispatchUiNote (const UiNoteEvent&, SF2Loader&) noexcept;
+    void dispatchMidiMessage (const juce::MidiMessage&, const SF2Loader&) noexcept;
+    void dispatchUiNote (const UiNoteEvent&, const SF2Loader&) noexcept;
     void renderRange (juce::AudioBuffer<float>&, int start, int count) noexcept;
     void syncBlockParameters() noexcept;
     static constexpr int maxBanks = 4;
@@ -309,11 +343,12 @@ private:
 
     // Multi-bank SoundFont storage. Each slot holds its own SF2Loader.
     // activeLoader_ always points to the active slot's loader for the audio thread.
-    std::array<std::unique_ptr<SF2Loader>, maxBanks> sf2Loaders_;
+    std::array<std::shared_ptr<const SF2Loader>, maxBanks> sf2Loaders_;
     std::array<juce::String, maxBanks> bankNames_;
     std::atomic<int> activeBankSlot_ { 0 };
-    std::atomic<SF2Loader*> activeLoader_ { nullptr };
-    std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
+    std::atomic<const SF2Loader*> activeLoader_ { nullptr };
+    std::atomic<std::uint32_t> audioBlocksInFlight_ { 0 };
+    std::vector<std::shared_ptr<const SF2Loader>> retiredLoaders_;
 
     // Bank generation counters: incremented on each successful loadSoundFont()
     std::array<std::atomic<std::uint32_t>, maxBanks> bankGeneration_ {};
@@ -331,8 +366,10 @@ private:
     std::atomic<int> currentProgram_ { 0 };
     std::atomic<float> lastPeak_ { 0.0f };
 
-    /** Set once the bundled font has been offered up; see loadBundledSoundFont(). */
-    bool bundledFontLoaded_ = false;
+    /** Set once the bundled font has been offered up; see loadBundledSoundFont().
+        Written by releaseResources() on the host's teardown thread and by the
+        message-thread drain, so it stays atomic. */
+    std::atomic<bool> bundledFontLoaded_ { false };
 
     // Message-thread -> audio-thread note events. Bounded and lock-free; if
     // the host is not running we drop rather than grow unbounded.
@@ -365,9 +402,11 @@ private:
 
     // Mirrors the voiceLegato APVTS param at the block boundary, the same
     // pattern as cachedOsFactorIndex_: a UI/automation change to the param is
-    // applied to legatoEnabled_ once per block, while a live CC65 message
-    // updates legatoEnabled_ (and this cache) immediately without ever
-    // writing back to the APVTS from the audio thread.
+    // applied to legatoEnabled_ once per block. A live CC65 message updates
+    // legatoEnabled_ and this cache immediately, then queues the deferred
+    // APVTS mirror through the same mailbox as CC71/74 — until the mirror
+    // lands, syncBlockParameters() leaves the controller's value alone
+    // instead of restoring the stale parameter, so CC65 persists.
     int cachedLegatoParamValue_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)

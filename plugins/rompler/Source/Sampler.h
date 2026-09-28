@@ -14,6 +14,8 @@
 
 namespace aod
 {
+class SF2Loader;
+
 /**
     Lightweight bank-generation token passed by value to Voice.
     Allows deferred cleanup of retired SoundFont instances without
@@ -54,7 +56,9 @@ struct Sample
 class Voice
 {
 public:
-    void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    ~Voice();
+    void start(const Sample* sample, int midiNote, float velocity,
+               const SF2Loader* sampleOwner = nullptr) noexcept;
     /**
         Legato retarget: changes the sounding note/pitch of an already-active
         voice without resetting the envelope, phase or loop state. Used when
@@ -62,7 +66,8 @@ public:
         down, so the pitch glides on the same voice instead of a fresh attack.
         No-op if the voice is not currently active.
     */
-    void retarget(const Sample* sample, int midiNote) noexcept;
+    void retarget(const Sample* sample, int midiNote,
+                  const SF2Loader* sampleOwner = nullptr) noexcept;
     /** Immediately retires the slot and clears its current note ownership. */
     void retire() noexcept;
     /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
@@ -93,11 +98,16 @@ public:
 
 private:
     const Sample* sample_ = nullptr;
+    const SF2Loader* sampleOwner_ = nullptr;
     double phase_ = 0.0;
     float velocity_ = 0.0f;
     bool active_ = false;
     juce::SmoothedValue<float> driveDbSmooth_;
     bool driveNeedsReset_ = true;
+    std::uint32_t steadyDriveDbBits_ = 0;
+    float steadyDriveBlend_ = 0.0f;
+    float steadyDriveGain_ = 1.0f;
+    bool steadyDriveCacheValid_ = false;
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
     float envelopeLevel_ = 0.0f;
@@ -138,6 +148,12 @@ private:
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
     int filterSampleRate_ = 0;
+    const Sample* filterParameterSample_ = nullptr;
+    std::uint32_t filterParameterOffsetBits_ = 0;
+    bool filterParametersCached_ = false;
+
+    void bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept;
+    void detachSample() noexcept;
 };
 
 class VoicePool
@@ -171,7 +187,15 @@ public:
     /** Caps the number of concurrently playing voices. Call from the audio thread. */
     void setPolyphony(int numVoices) noexcept;
 
-    void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    /**
+        Reserve the scratch buffer used by renderStereo(). This must run before
+        the host starts calling processBlock(); renderStereo() never grows the
+        buffer on the audio thread.
+    */
+    void prepare(int maximumExpectedSamplesPerBlock);
+
+    void start(const Sample* sample, int midiNote, float velocity,
+               const SF2Loader* sampleOwner = nullptr) noexcept;
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
@@ -195,8 +219,40 @@ public:
                 float attackMs, float decayMs, float sustainLevel, float releaseMs,
                 float pitchBendSemitones, float vibratoDepthCents) noexcept;
 
+    /**
+        Per-lane gains of the synthetic stereo spread.
+
+        Every lane returns the same total power (left^2 + right^2) as the
+        legacy dual-mono signal, and lane 0 is centred at unity in both
+        channels. A zero or negative width therefore collapses all lanes to
+        that centre. Non-finite widths are clamped away by the caller.
+    */
+    struct StereoGains
+    {
+        float left = 1.0f;
+        float right = 1.0f;
+    };
+
+    [[nodiscard]] static StereoGains stereoGainsForVoice(std::size_t voiceIndex, float width) noexcept;
+
+    /**
+        Render the voices into independent L/R accumulators. Each active voice
+        is rendered once into a prepared scratch buffer and then summed into
+        both channels with its per-lane equal-power gain. A width of zero
+        reproduces the legacy mono render copied to both channels. A mono host,
+        an unprepared pool, an oversized host block, or a non-finite width
+        falls back to that same dual-mono path without allocating.
+    */
+    void renderStereo(float* outputLeft, float* outputRight, int numSamples,
+                      int hostSampleRate, float driveDb, float velToDriveDb,
+                      int curveId, int filterRouting, float filterOffsetCents,
+                      float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                      float pitchBendSemitones, float vibratoDepthCents,
+                      float stereoWidth) noexcept;
+
 private:
     std::vector<Voice> voices_;
+    std::vector<float> stereoScratch_;
     const BandLimitedInterpolator* interpolator_ = nullptr;
     std::array<int, 128> noteToVoice_ {};
     int polyphony_ = 0;
@@ -215,7 +271,8 @@ private:
     int leadVoiceIndex_ = -1;
 
     void releaseNote(int midiNote) noexcept;
-    void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity) noexcept;
+    void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
+                    const SF2Loader* sampleOwner) noexcept;
     [[nodiscard]] bool isProtectedFromStealing(std::size_t voiceIndex) const noexcept;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;
