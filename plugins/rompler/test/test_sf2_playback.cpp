@@ -2,8 +2,10 @@
 
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
+#include "Sf2Builder.h"
 
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -14,6 +16,24 @@ juce::File testSf2File()
 {
     return juce::File (X10_SF2_CROSSCHECK_TESTDATA "/Dr._Mario_64_Soundfont.sf2");
 }
+
+class GeneratedSf2Fixture
+{
+public:
+    GeneratedSf2Fixture()
+        : file_ (".sf2")
+    {
+        x10::sf2::test::Sf2Builder builder;
+        builder.sampleFrames = 4096;
+        const auto bytes = builder.build();
+        REQUIRE (file_.getFile().replaceWithData (bytes.data(), bytes.size()));
+    }
+
+    [[nodiscard]] const juce::File& file() const noexcept { return file_.getFile(); }
+
+private:
+    juce::TemporaryFile file_;
+};
 } // namespace
 
 TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf2][m1]")
@@ -65,6 +85,51 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
         peak = std::max (peak, buffer.getMagnitude (ch, 0, kBlockSize));
 
     REQUIRE (peak > 0.0f);
+}
+
+TEST_CASE ("processor honours the MIDI sample offset", "[sf2][midi][timing]")
+{
+    const GeneratedSf2Fixture fixture;
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (fixture.file()));
+    const auto [bank, program] = loader.firstPresetProgram();
+
+    int soundingKey = -1;
+    for (int key = 0; key < 128 && soundingKey < 0; ++key)
+        if (loader.getSample (bank, program, key, 100) != nullptr)
+            soundingKey = key;
+    REQUIRE (soundingKey >= 0);
+    auto renderAt = [&] (int sampleOffset)
+    {
+        aod::RomplerProcessor processor;
+        processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+        processor.prepareToPlay (kSampleRate, kBlockSize);
+        processor.loadSoundFont (fixture.file());
+        processor.selectPreset (bank, program);
+
+        juce::AudioBuffer<float> rendered (2, kBlockSize);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, soundingKey, static_cast<juce::uint8> (100)),
+                       sampleOffset);
+        processor.processBlock (rendered, midi);
+        return rendered;
+    };
+
+    constexpr int noteOffset = 384;
+    const auto immediate = renderAt (0);
+    const auto delayed = renderAt (noteOffset);
+
+    float maxDifference = 0.0f;
+    for (int sample = 0; sample < kBlockSize; ++sample)
+        maxDifference = std::max (maxDifference,
+                                  std::abs (immediate.getSample (0, sample)
+                                            - delayed.getSample (0, sample)));
+
+    REQUIRE (immediate.getMagnitude (0, 0, kBlockSize) > 0.0f);
+    REQUIRE (delayed.getMagnitude (0, 0, noteOffset) <= std::numeric_limits<float>::epsilon());
+    REQUIRE (delayed.getMagnitude (0, noteOffset, kBlockSize - noteOffset) > 0.0f);
+    REQUIRE (maxDifference > 0.0f);
 }
 
 TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")

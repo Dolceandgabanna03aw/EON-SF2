@@ -110,32 +110,6 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         }
     }
 
-    for (const auto event : midiMessages)
-    {
-        const auto msg = event.getMessage();
-
-        if (msg.isNoteOn())
-        {
-            const int note = msg.getNoteNumber();
-            const int velocity = msg.getVelocity();
-            const int bank = currentBank_.load (std::memory_order_relaxed);
-            const int program = currentProgram_.load (std::memory_order_relaxed);
-            Sample* sample = loader->getSample(bank, program, note, velocity);
-
-            if (sample != nullptr)
-                voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
-        }
-        else if (msg.isNoteOff())
-        {
-            const int note = msg.getNoteNumber();
-            voicePool_->stop(note);
-        }
-        else if (msg.isProgramChange())
-        {
-            currentProgram_.store (msg.getProgramChangeNumber(), std::memory_order_relaxed);
-        }
-    }
-
     const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
     const auto curveParam = apvts_.getRawParameterValue(ParamIDs::voiceCurve);
     const auto velToDriveParam = apvts_.getRawParameterValue(ParamIDs::voiceVelToDrive);
@@ -151,8 +125,41 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     if (polyLimitParam)
         voicePool_->setPolyphony (static_cast<int> (polyLimitParam->load()));
 
-    voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, velToDriveDb,
-                        curveId, filterRouting, filterOffsetCents);
+    auto renderRange = [&] (int startSample, int endSample) noexcept
+    {
+        const int rangeLength = endSample - startSample;
+        if (rangeLength > 0)
+            voicePool_->render (outL + startSample, rangeLength, static_cast<int> (sampleRate_),
+                                driveDb, velToDriveDb, curveId, filterRouting, filterOffsetCents);
+    };
+
+    int renderedUntil = 0;
+    for (const auto event : midiMessages)
+    {
+        const int eventSample = juce::jlimit (renderedUntil, numSamples, event.samplePosition);
+        renderRange (renderedUntil, eventSample);
+        renderedUntil = eventSample;
+
+        const auto msg = event.getMessage();
+        if (msg.isNoteOn())
+        {
+            const int note = msg.getNoteNumber();
+            const int velocity = msg.getVelocity();
+            const int bank = currentBank_.load (std::memory_order_relaxed);
+            const int program = currentProgram_.load (std::memory_order_relaxed);
+            if (Sample* sample = loader->getSample (bank, program, note, velocity))
+                voicePool_->start (sample, note, static_cast<float> (velocity) / 127.0f);
+        }
+        else if (msg.isNoteOff())
+        {
+            voicePool_->stop (msg.getNoteNumber());
+        }
+        else if (msg.isProgramChange())
+        {
+            currentProgram_.store (msg.getProgramChangeNumber(), std::memory_order_relaxed);
+        }
+    }
+    renderRange (renderedUntil, numSamples);
 
     if (buffer.getNumChannels() > 1)
     {
