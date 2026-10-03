@@ -130,6 +130,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const bool looping = loopEnabled_ && !releasing_ && loopEnd > loopStart + 1;
     const auto loopLength = static_cast<double> (loopEnd - loopStart);
 
+    // Source frames to advance per output sample. The loader normally
+    // resamples every sample to the host rate (ratio 1), but this keeps the
+    // pitch right if the host rate has changed since.
+    const double sourceRate = sample_->sampleRate > 0 ? static_cast<double> (sample_->sampleRate)
+                                                      : static_cast<double> (hostSampleRate);
+    const double step = playRate_ * sourceRate / static_cast<double> (hostSampleRate);
+
     for (int i = 0; i < numSamples; ++i)
     {
         if (!looping)
@@ -191,7 +198,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         output[i] += sample;
 
-        phase_ += playRate_;
+        phase_ += step;
 
         // Wrap the loop: once the read position passes loopEnd, continue from
         // loopStart keeping the fractional part, so the interpolation phase is
@@ -265,6 +272,14 @@ bool VoicePool::isNoteActive(int midiNote) const noexcept
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
     for (std::size_t i = 0; i < limit; ++i)
         if (voices_[i].isActive() && voices_[i].note() == midiNote)
+            return true;
+    return false;
+}
+
+bool VoicePool::anyActiveStartedAtOrBefore(std::uint64_t stamp) const noexcept
+{
+    for (const auto& voice : voices_)
+        if (voice.isActive() && voice.startOrder() <= stamp)
             return true;
     return false;
 }

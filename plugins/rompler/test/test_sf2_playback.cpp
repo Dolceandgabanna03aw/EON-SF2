@@ -45,12 +45,27 @@ class LoopingSf2Fixture
 {
 public:
     LoopingSf2Fixture (std::uint32_t sourceRate, std::uint32_t frames,
-                       std::uint32_t loopStart, std::uint32_t loopEnd)
+                       std::uint32_t loopStart, std::uint32_t loopEnd,
+                       bool twoPresets = false)
         : file_ (".sf2")
     {
         using namespace x10::sf2::test;
         Sf2Builder builder;
         builder.sampleFrames = frames;
+
+        if (twoPresets)
+        {
+            // Both presets play the same instrument; only (bank, program) differ.
+            BuilderPreset first;
+            first.name = "First";
+            first.zones.push_back (BuilderZone { { { 41, 0 } } });
+            BuilderPreset second;
+            second.name    = "Second";
+            second.bank    = 1;
+            second.program = 5;
+            second.zones.push_back (BuilderZone { { { 41, 0 } } });
+            builder.presets = { first, second };
+        }
 
         BuilderInstrument instrument;
         instrument.name = "Looping";
@@ -366,4 +381,266 @@ TEST_CASE ("a resampled loop repeats at the source loop's rate", "[sf2][loop][re
     const double perSecond = wraps / 0.9;
     CAPTURE (wraps, perSecond);
     CHECK (std::abs (perSecond - 22050.0 / 180.0) < 2.0);
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Holds note 60 for `seconds` on an already prepared processor; returns channel 0. */
+std::vector<float> renderHeldNote (aod::RomplerProcessor& processor, double rate, double seconds,
+                                   int velocity = 127)
+{
+    setParameter (processor, aod::ParamIDs::fxChorusMix, 0.0f);
+    setParameter (processor, aod::ParamIDs::fxReverbMix, 0.0f);
+    setParameter (processor, aod::ParamIDs::voiceDrive, 0.0f);
+
+    const int total = static_cast<int> (seconds * rate) / kBlockSize * kBlockSize;
+    std::vector<float> out;
+    out.reserve (static_cast<std::size_t> (total));
+    juce::AudioBuffer<float> block (2, kBlockSize);
+    for (int pos = 0; pos < total; pos += kBlockSize)
+    {
+        juce::MidiBuffer midi;
+        if (pos == 0)
+            midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (velocity)), 0);
+        block.clear();
+        processor.processBlock (block, midi);
+        out.insert (out.end(), block.getReadPointer (0), block.getReadPointer (0) + kBlockSize);
+    }
+    return out;
+}
+
+/** Loop repetitions per second of the ramp bank, skipping the first 100 ms. */
+double loopWrapsPerSecond (const std::vector<float>& out, double rate)
+{
+    const auto skip = static_cast<std::size_t> (rate / 10.0);
+    int wraps = 0;
+    std::size_t lastWrap = 0;
+    for (std::size_t i = skip; i < out.size(); ++i)
+        if (out[i] < out[i - 1] - 0.05f && i - lastWrap > 32)
+        {
+            ++wraps;
+            lastWrap = i;
+        }
+    return wraps / (static_cast<double> (out.size() - skip) / rate);
+}
+
+float peakOf (const std::vector<float>& out)
+{
+    float peak = 0.0f;
+    for (const float x : out)
+        peak = std::max (peak, std::abs (x));
+    return peak;
+}
+
+juce::MemoryBlock stateOf (aod::RomplerProcessor& processor)
+{
+    juce::MemoryBlock block;
+    processor.getStateInformation (block);
+    return block;
+}
+} // namespace
+
+TEST_CASE ("a loaded SoundFont survives releaseResources and a sample-rate change", "[sf2][state][lifecycle]")
+{
+    // 180-frame loop at 22.05 kHz: 122.5 loop repetitions per second at the root key.
+    const LoopingSf2Fixture bank (22050, 300, 60, 240);
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+    processor.loadSoundFont (bank.file());
+    REQUIRE (processor.getPresetCount() == 1);
+
+    processor.releaseResources();
+    REQUIRE (processor.getPresetCount() == 1);
+    REQUIRE (processor.getLoadedFileName() == bank.file().getFileName());
+
+    SECTION ("restart at the same rate")
+    {
+        processor.prepareToPlay (kSampleRate, kBlockSize);
+        const auto out = renderHeldNote (processor, kSampleRate, 1.0);
+        CHECK (peakOf (out) > 0.1f);
+        CHECK (std::abs (loopWrapsPerSecond (out, kSampleRate) - 22050.0 / 180.0) < 2.0);
+    }
+
+    SECTION ("restart at 44.1 kHz keeps the pitch")
+    {
+        constexpr double newRate = 44100.0;
+        processor.setPlayConfigDetails (0, 2, newRate, kBlockSize);
+        processor.prepareToPlay (newRate, kBlockSize);
+        REQUIRE (processor.getPresetCount() == 1);
+        CHECK (processor.getRetiredLoaderCount() == 0);
+
+        const auto out = renderHeldNote (processor, newRate, 1.0);
+        CHECK (peakOf (out) > 0.1f);
+        CHECK (std::abs (loopWrapsPerSecond (out, newRate) - 22050.0 / 180.0) < 2.0);
+    }
+
+    processor.releaseResources();
+}
+
+TEST_CASE ("the SoundFont and preset are saved and restored with the session", "[sf2][state]")
+{
+    const LoopingSf2Fixture bank (44100, 300, 20, 280, true);
+
+    aod::RomplerProcessor original;
+    original.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    original.prepareToPlay (kSampleRate, kBlockSize);
+    original.loadSoundFont (bank.file());
+    REQUIRE (original.getPresetCount() == 2);
+    original.selectPreset (1, 5);
+    setParameter (original, aod::ParamIDs::voiceDrive, 37.0f);
+    const auto saved = stateOf (original);
+    original.releaseResources();
+
+    auto requireRestored = [&] (aod::RomplerProcessor& restored, double rate)
+    {
+        CHECK (restored.getLoadedFileName() == bank.file().getFileName());
+        CHECK (restored.getSoundFontPath() == bank.file().getFullPathName());
+        CHECK (restored.getPresetCount() == 2);
+        CHECK (restored.getCurrentBankProgram() == std::pair<int, int> { 1, 5 });
+        auto* drive = restored.getValueTreeState().getRawParameterValue (aod::ParamIDs::voiceDrive);
+        REQUIRE (drive != nullptr);
+        CHECK (std::abs (drive->load() - 37.0f) < 0.01f);
+        CHECK (peakOf (renderHeldNote (restored, rate, 0.2)) > 0.1f);
+    };
+
+    SECTION ("restored before prepareToPlay, at a different rate")
+    {
+        aod::RomplerProcessor restored;
+        restored.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        restored.setPlayConfigDetails (0, 2, 44100.0, kBlockSize);
+        restored.prepareToPlay (44100.0, kBlockSize);
+        requireRestored (restored, 44100.0);
+        restored.releaseResources();
+    }
+
+    SECTION ("restored into an instance that is already running")
+    {
+        aod::RomplerProcessor restored;
+        restored.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+        restored.prepareToPlay (kSampleRate, kBlockSize);
+        restored.setStateInformation (saved.getData(), static_cast<int> (saved.getSize()));
+        requireRestored (restored, kSampleRate);
+        restored.releaseResources();
+    }
+}
+
+TEST_CASE ("state saved by older builds still restores parameters", "[sf2][state]")
+{
+    const LoopingSf2Fixture bank (48000, 300, 20, 280);
+
+    // Old format: the bare APVTS tree, no SoundFont properties.
+    juce::MemoryBlock oldState;
+    {
+        aod::RomplerProcessor old;
+        setParameter (old, aod::ParamIDs::voiceDrive, 63.0f);
+        auto xml = old.getValueTreeState().copyState().createXml();
+        REQUIRE (xml != nullptr);
+        juce::AudioProcessor::copyXmlToBinary (*xml, oldState);
+    }
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+    processor.loadSoundFont (bank.file());
+    processor.setStateInformation (oldState.getData(), static_cast<int> (oldState.getSize()));
+
+    auto* drive = processor.getValueTreeState().getRawParameterValue (aod::ParamIDs::voiceDrive);
+    REQUIRE (drive != nullptr);
+    CHECK (std::abs (drive->load() - 63.0f) < 0.01f);
+    // The bank that was loaded stays loaded; old state never named one.
+    CHECK (processor.getPresetCount() == 1);
+    CHECK (processor.getLoadedFileName() == bank.file().getFileName());
+    // And the parameter tree carries no SoundFont properties of its own.
+    CHECK_FALSE (processor.getValueTreeState().state.hasProperty ("sf2Path"));
+    processor.releaseResources();
+}
+
+TEST_CASE ("a missing SoundFont keeps its path in re-saved state", "[sf2][state]")
+{
+    const juce::String missing = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                     .getChildFile ("eon-ds50-does-not-exist")
+                                     .getChildFile ("missing.sf2")
+                                     .getFullPathName();
+    juce::MemoryBlock state;
+    {
+        aod::RomplerProcessor source;
+        auto tree = source.getValueTreeState().copyState();
+        tree.setProperty ("sf2Path", missing, nullptr);
+        tree.setProperty ("sf2Bank", 2, nullptr);
+        tree.setProperty ("sf2Program", 7, nullptr);
+        auto xml = tree.createXml();
+        REQUIRE (xml != nullptr);
+        juce::AudioProcessor::copyXmlToBinary (*xml, state);
+    }
+
+    aod::RomplerProcessor processor;
+    processor.setStateInformation (state.getData(), static_cast<int> (state.getSize()));
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    CHECK (processor.getSoundFontPath() == missing);
+    CHECK (processor.getCurrentBankProgram() == std::pair<int, int> { 2, 7 });
+
+    const auto resaved = stateOf (processor);
+    const auto xml = juce::AudioProcessor::getXmlFromBinary (resaved.getData(), static_cast<int> (resaved.getSize()));
+    REQUIRE (xml != nullptr);
+    CHECK (xml->getStringAttribute ("sf2Path") == missing);
+    CHECK (xml->getIntAttribute ("sf2Bank") == 2);
+    CHECK (xml->getIntAttribute ("sf2Program") == 7);
+    processor.releaseResources();
+}
+
+TEST_CASE ("repeated SoundFont loads while running do not pile up retired loaders", "[sf2][state][lifecycle]")
+{
+    const LoopingSf2Fixture bank (48000, 300, 20, 280);
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+
+    juce::AudioBuffer<float> block (2, kBlockSize);
+    auto process = [&] (int blocks, int noteOn = -1, int noteOff = -1)
+    {
+        for (int b = 0; b < blocks; ++b)
+        {
+            juce::MidiBuffer midi;
+            if (b == 0 && noteOn >= 0)
+                midi.addEvent (juce::MidiMessage::noteOn (1, noteOn, static_cast<juce::uint8> (100)), 0);
+            if (b == 0 && noteOff >= 0)
+                midi.addEvent (juce::MidiMessage::noteOff (1, noteOff), 0);
+            block.clear();
+            processor.processBlock (block, midi);
+        }
+    };
+
+    SECTION ("idle: each load frees the previous retirees")
+    {
+        for (int i = 0; i < 20; ++i)
+        {
+            processor.loadSoundFont (bank.file());
+            process (1);
+        }
+        CHECK (processor.getRetiredLoaderCount() <= 1);
+    }
+
+    SECTION ("a held note keeps its loader alive until it has finished")
+    {
+        processor.loadSoundFont (bank.file());     // L1
+        process (1, 60);                           // note 60 plays L1's sample
+        processor.loadSoundFont (bank.file());     // L2; L1 retired
+        process (2);
+        processor.loadSoundFont (bank.file());     // L3; L1 still referenced
+        process (2);                               // (ASan would flag a premature free here)
+        CHECK (processor.getRetiredLoaderCount() == 2);
+
+        process (20, -1, 60);                      // release + 80 ms fade: note 60 done
+        processor.loadSoundFont (bank.file());     // frees L1 and L2, retires L3
+        CHECK (processor.getRetiredLoaderCount() == 1);
+    }
+
+    processor.releaseResources();
+    CHECK (processor.getRetiredLoaderCount() == 0);
 }

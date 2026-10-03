@@ -729,3 +729,24 @@ TEST_CASE ("raising drive saturates and gets louder instead of collapsing", "[ds
         }
     }
 }
+
+TEST_CASE ("a sample not at the host rate still plays at its recorded pitch", "[dsp][voice][resample]")
+{
+    // The tone is 1 kHz at 48 kHz; declared as 24 kHz it is really a 500 Hz
+    // recording. The processor normally resamples banks to the host rate, but
+    // if a rebuild after a rate change fails, the voice must compensate.
+    aod::Sample sample = makeTone();
+    sample.sampleRate = kSampleRate / 2;
+
+    aod::VoicePool pool (1);
+    pool.start (&sample, 60, 1.0f);
+    std::vector<float> out (static_cast<std::size_t> (kSampleRate / 2)); // 0.5 s
+    pool.render (out.data(), static_cast<int> (out.size()), kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    int upward = 0;
+    for (std::size_t i = 1; i < out.size(); ++i)
+        if (out[i - 1] < 0.0f && out[i] >= 0.0f)
+            ++upward;
+    CAPTURE (upward);
+    CHECK (std::abs (upward - 250) <= 2); // 500 Hz for 0.5 s
+}

@@ -107,9 +107,10 @@ private:
     int loopEnd_ = 0;
     bool loopEnabled_ = false;
 
-    // Playback rate in source frames per output sample. 1.0 plays the sample at
-    // its recorded pitch; a higher MIDI note advances faster, a lower one
-    // slower. Computed once at start() from the note, rootKey and tunings.
+    // Pitch ratio from the note, rootKey and tunings, computed once at
+    // start(). render() multiplies it by sampleRate / hostSampleRate, so a
+    // sample that was not resampled to the current host rate (e.g. the host
+    // rate changed and the bank could not be reloaded) still plays in tune.
     double playRate_ = 1.0;
 
     x10::dsp::TptSvf filter_;
@@ -135,6 +136,17 @@ public:
 
     /** True if a voice (sustaining or releasing) is currently sounding midiNote. */
     [[nodiscard]] bool isNoteActive(int midiNote) const noexcept;
+
+    /** Stamp of the most recent start(); every later start() gets a larger one. */
+    [[nodiscard]] std::uint64_t lastStartOrder() const noexcept { return nextStartOrder_; }
+
+    /**
+        True while any voice started at or before `stamp` is still active,
+        including voices above the current polyphony cap. The processor uses
+        this to tell when no voice can still be reading a retired loader's
+        samples.
+    */
+    [[nodiscard]] bool anyActiveStartedAtOrBefore(std::uint64_t stamp) const noexcept;
 
     /** driveAmount 0..1 and velToDrive -1..1; see Voice::render() for the mapping. */
     void render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,

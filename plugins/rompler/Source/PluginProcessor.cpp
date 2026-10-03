@@ -21,12 +21,36 @@ RomplerProcessor::RomplerProcessor()
 
 void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
+    // The host guarantees the audio thread is stopped here (and a host may
+    // call prepareToPlay() twice without releaseResources() in between).
+    prepared_ = false;
     sampleRate_ = sampleRate;
+
+    // A fresh pool has no voices, so nothing references any retired loader.
     voicePool_ = std::make_unique<VoicePool>();
+    retiredLoaders_.clear();
+    lastSeenLoader_ = nullptr;
+    loaderSwitchStamp_ = 0;
+    acknowledgedLoader_.store (nullptr, std::memory_order_relaxed);
+
+    // The loaded bank survives releaseResources(). If it was resampled for a
+    // different rate, rebuild it from the same file at the new rate, keeping
+    // the selected preset. This runs here, not on the audio thread. If the
+    // file is gone the old loader stays: Voice scales its step by
+    // sampleRate / hostRate, so it still plays in tune, only with the
+    // original rate conversion.
+    if (sf2Loader_ != nullptr && sf2Loader_->hostSampleRate() != static_cast<int> (sampleRate))
+    {
+        const auto bankProgram = getCurrentBankProgram();
+        if (loadSoundFontInternal (loadedFile_, &bankProgram, false))
+            retiredLoaders_.clear(); // the pool is fresh: nothing reads the old one
+    }
 
     // Surface the bundled SoundFont so the plugin starts usable without a
-    // manual Load step when the packaged font is present.
-    loadBundledSoundFont();
+    // manual Load step when the packaged font is present and nothing else
+    // (a user file or a restored session) is loaded.
+    if (sf2Loader_ == nullptr)
+        loadBundledSoundFont();
 
     busProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
     fxProcessor_.prepare (sampleRate, maximumExpectedSamplesPerBlock, getTotalNumOutputChannels());
@@ -38,29 +62,24 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
     const auto osFactorParam = apvts_.getRawParameterValue (ParamIDs::busOsFactor);
     cachedOsFactorIndex_ = osFactorParam ? static_cast<int> (osFactorParam->load()) : 2;
     setLatencySamples (busProcessor_.getLatencySamples (cachedOsFactorIndex_));
+
+    prepared_ = true;
 }
 
 void RomplerProcessor::releaseResources()
 {
-    // The audio thread is guaranteed stopped here, so it is safe to retire
-    // the loaders: processBlock() can no longer read activeLoader_ between
-    // this store and the vector push below. Leaving the pointer set would
-    // hand processBlock() a dangling reference if the host restarts audio
-    // without a fresh prepareToPlay().
+    // The audio thread is guaranteed stopped here. The loaded bank is kept,
+    // not retired: the host may restart audio (sample-rate change, device
+    // switch, offline bounce) and the user's SoundFont must still be there.
+    // activeLoader_ stays published. processBlock() returns early without a
+    // voice pool, so a host that calls it before prepareToPlay() gets
+    // silence, not a dangling loader.
     //
-    // The loader stays alive in retiredLoaders_ (never deleted here): voices
-    // may still hold const Sample* into its sample map, and the pool is only
-    // cleared after this, so no sample pointer outlives its owner.
-    activeLoader_.store (nullptr, std::memory_order_relaxed);
-    if (sf2Loader_)
-        retiredLoaders_.push_back (std::move (sf2Loader_));
-
-    // A fresh prepareToPlay() may come with the bundle now present (late
-    // install) or a different font packaged, so allow the bundled font to be
-    // offered again on the next audio start.
-    bundledFontLoaded_ = false;
-
+    // The voices go first, then the retired loaders: once the pool is gone
+    // no Sample* into a retired loader is left anywhere.
+    prepared_ = false;
     voicePool_.reset();
+    retiredLoaders_.clear();
 }
 
 bool RomplerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -82,6 +101,14 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
     if (!voicePool_ || loader == nullptr)
         return;
+
+    // First block on a newly published loader: every voice started up to
+    // now may hold samples from an older loader. See acknowledgedLoader_.
+    if (loader != lastSeenLoader_)
+    {
+        lastSeenLoader_ = loader;
+        loaderSwitchStamp_ = voicePool_->lastStartOrder();
+    }
 
     float* outL = buffer.getWritePointer(0);
     const int numSamples = buffer.getNumSamples();
@@ -164,6 +191,12 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     }
     renderRange (renderedUntil, numSamples);
 
+    // Once every voice from before the switch has finished, no voice can be
+    // reading a retired loader. Let the message thread free them.
+    if (acknowledgedLoader_.load (std::memory_order_relaxed) != loader
+        && ! voicePool_->anyActiveStartedAtOrBefore (loaderSwitchStamp_))
+        acknowledgedLoader_.store (loader, std::memory_order_release);
+
     if (buffer.getNumChannels() > 1)
     {
         float* outR = buffer.getWritePointer(1);
@@ -208,29 +241,116 @@ juce::AudioProcessorEditor* RomplerProcessor::createEditor()
     return new RomplerEditor (*this);
 }
 
+namespace
+{
+    // State properties added alongside the APVTS parameters. A state saved by
+    // an older build has none of them and restores exactly as before.
+    const juce::Identifier sf2PathProperty    { "sf2Path" };
+    const juce::Identifier sf2BankProperty    { "sf2Bank" };
+    const juce::Identifier sf2ProgramProperty { "sf2Program" };
+} // namespace
+
 void RomplerProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts_.copyState().createXml())
+    auto state = apvts_.copyState();
+    state.setProperty (sf2PathProperty, getSoundFontPath(), nullptr);
+    const auto [bank, program] = getCurrentBankProgram();
+    state.setProperty (sf2BankProperty, bank, nullptr);
+    state.setProperty (sf2ProgramProperty, program, nullptr);
+
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
 void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts_.state.getType()))
-            apvts_.replaceState (juce::ValueTree::fromXml (*xml));
+    const auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || ! xml->hasTagName (apvts_.state.getType()))
+        return;
+
+    auto state = juce::ValueTree::fromXml (*xml);
+    const bool hasSoundFontInfo = state.hasProperty (sf2PathProperty)
+                               || state.hasProperty (sf2BankProperty);
+    const juce::String path = state.getProperty (sf2PathProperty).toString();
+    const std::pair<int, int> bankProgram { static_cast<int> (state.getProperty (sf2BankProperty, 0)),
+                                            static_cast<int> (state.getProperty (sf2ProgramProperty, 0)) };
+
+    // Keep the APVTS tree to parameters only.
+    state.removeProperty (sf2PathProperty, nullptr);
+    state.removeProperty (sf2BankProperty, nullptr);
+    state.removeProperty (sf2ProgramProperty, nullptr);
+    apvts_.replaceState (state);
+
+    // Older state: leave whatever bank is loaded (bundled or user) alone.
+    if (! hasSoundFontInfo)
+        return;
+
+    if (path.isNotEmpty())
+    {
+        {
+            // Remember the session's file even if it cannot be loaded right
+            // now (moved drive, other machine), so re-saving keeps it.
+            const std::lock_guard lock (soundFontPathMutex_);
+            soundFontPath_ = path;
+        }
+
+        if (juce::File::isAbsolutePath (path))
+        {
+            const juce::File file (path);
+            if (sf2Loader_ != nullptr && loadedFile_ == file)
+            {
+                selectPreset (bankProgram.first, bankProgram.second);
+                return;
+            }
+            // Loads at the current rate; prepareToPlay() rebuilds it if the
+            // host then prepares at a different one.
+            if (loadSoundFontInternal (file, &bankProgram, true))
+                return;
+        }
+    }
+
+    // No file, or it failed to load: keep the current bank and apply the
+    // preset to it, or to the bundled font once prepareToPlay() loads it.
+    selectPreset (bankProgram.first, bankProgram.second);
+    if (sf2Loader_ == nullptr)
+        pendingBankProgram_ = bankProgram;
 }
 
-void RomplerProcessor::loadSoundFont(const juce::File& file)
+juce::String RomplerProcessor::getSoundFontPath() const
+{
+    const std::lock_guard lock (soundFontPathMutex_);
+    return soundFontPath_;
+}
+
+void RomplerProcessor::loadSoundFont (const juce::File& file)
+{
+    loadSoundFontInternal (file, nullptr, true);
+}
+
+bool RomplerProcessor::loadSoundFontInternal (const juce::File& file, const std::pair<int, int>* bankProgram,
+                                              bool rememberPath)
 {
     auto newLoader = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
     if (!newLoader->loadFile(file))
-        return;
+        return false;
 
-    const auto [bank, program] = newLoader->firstPresetProgram();
+    const auto [bank, program] = bankProgram != nullptr ? *bankProgram : newLoader->firstPresetProgram();
     currentBank_.store (bank, std::memory_order_relaxed);
     currentProgram_.store (program, std::memory_order_relaxed);
     loadedFileName_ = file.getFileName();
+    loadedFile_ = file;
+    pendingBankProgram_.reset();
+
+    if (rememberPath)
+    {
+        const std::lock_guard lock (soundFontPathMutex_);
+        soundFontPath_ = file.getFullPathName();
+    }
+
+    // Reclaim loaders retired by earlier swaps if the audio thread has
+    // confirmed it no longer uses them. This keeps retiredLoaders_ from
+    // growing without bound across repeated loads in one session.
+    freeRetiredLoadersIfUnused();
 
     // Publish the new loader before retiring the old one: a note-on on the
     // audio thread that reads activeLoader_ right now must see either the
@@ -240,6 +360,22 @@ void RomplerProcessor::loadSoundFont(const juce::File& file)
     if (sf2Loader_)
         retiredLoaders_.push_back (std::move (sf2Loader_));
     sf2Loader_ = std::move (newLoader);
+    return true;
+}
+
+void RomplerProcessor::freeRetiredLoadersIfUnused()
+{
+    if (retiredLoaders_.empty())
+        return;
+
+    // Not prepared: no audio thread is running and the pool is empty or gone.
+    // Prepared: safe once the audio thread has acknowledged the current
+    // loader, i.e. every voice that could hold an older loader's samples has
+    // finished. Retired loaders are always older than sf2Loader_.
+    if (! prepared_
+        || (sf2Loader_ != nullptr
+            && acknowledgedLoader_.load (std::memory_order_acquire) == sf2Loader_.get()))
+        retiredLoaders_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +425,10 @@ void RomplerProcessor::loadBundledSoundFont()
     const juce::File file = pathForBundledSoundFont();
     if (file.existsAsFile())
     {
-        loadSoundFont (file);
+        // Not remembered as the session's file: the bundle is located again
+        // at startup. A preset restored from state is applied to it.
+        const auto pending = pendingBankProgram_;
+        loadSoundFontInternal (file, pending ? &*pending : nullptr, false);
         // Only latch once the font is actually loaded. A failed or absent
         // bundle must be retried on the next prepareToPlay() (e.g. the host
         // restarts audio, or the bundle appears after a late install).
