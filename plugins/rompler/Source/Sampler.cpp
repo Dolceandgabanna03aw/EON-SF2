@@ -39,9 +39,13 @@ void Voice::stop() noexcept
 {
     if (!active_ || releasing_)
         return;
-    releasing_ = true;
-    releasePhase_ = envPhase_;
+    // Capture the level *before* flagging the release: envelope() takes the
+    // release branch once releasing_ is set, and would then report the stale
+    // releaseLevel_ (0 after start()), so the fade began at zero — an
+    // instantaneous cut to silence on every note-off.
     releaseLevel_ = envelope();
+    releasePhase_ = envPhase_;
+    releasing_ = true;
 }
 
 float Voice::envelope() const noexcept
@@ -50,29 +54,24 @@ float Voice::envelope() const noexcept
     constexpr float decayTime = 0.3f;
     constexpr float sustainLevel = 0.7f;
 
-    float level;
-    if (envPhase_ < attackTime)
-        level = envPhase_ / attackTime;
-    else if (envPhase_ < attackTime + decayTime)
-        level = 1.0f - (envPhase_ - attackTime) / decayTime * (1.0f - sustainLevel);
-    else
-        level = sustainLevel;
-
     if (releasing_)
     {
-        // Scale the release ramp duration by the level at release time: a note
-        // released mid-attack (level 0.5) fades over half the nominal release
-        // time, so the *slope* of the fade is the same as a full-level release.
-        // A fixed-time ramp from a low level is a much sharper slope and clicks;
-        // this keeps the fade audibly consistent whatever the release level.
-        const float rampTime = releaseTime * std::max (releaseLevel_, 0.05f);
-        const float t = (envPhase_ - releasePhase_) / rampTime;
+        // Linear fade from the level captured at note-off down to zero over
+        // releaseTime. A lower starting level fades with a gentler slope, so
+        // a release mid-attack never produces a steeper edge than a release
+        // from full level.
+        const auto t = static_cast<float> ((envPhase_ - releasePhase_) / static_cast<double> (releaseTime));
         if (t >= 1.0f)
             return 0.0f;
         return releaseLevel_ * (1.0f - t);
     }
 
-    return level;
+    const auto phase = static_cast<float> (envPhase_);
+    if (phase < attackTime)
+        return phase / attackTime;
+    if (phase < attackTime + decayTime)
+        return 1.0f - (phase - attackTime) / decayTime * (1.0f - sustainLevel);
+    return sustainLevel;
 }
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
@@ -96,7 +95,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
-    const float invHostSampleRate = 1.0f / static_cast<float>(hostSampleRate);
+    const double invHostSampleRate = 1.0 / static_cast<double>(hostSampleRate);
 
     // Velocity shapes the drive amount: velToDriveDb at 0% is neutral, +100%
     // makes hard hits drive harder and -100% does the inverse. This is an
@@ -148,7 +147,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         // Deactivate once the release fade has fully ramped to zero; the
         // envelope becomes 0.0 at that point, so stop burning samples early.
-        if (releasing_ && envPhase_ - releasePhase_ >= releaseTime)
+        if (releasing_ && envPhase_ - releasePhase_ >= static_cast<double> (releaseTime))
         {
             active_ = false;
             break;

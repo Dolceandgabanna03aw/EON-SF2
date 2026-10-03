@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "Sampler.h"
@@ -352,4 +353,115 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // combined envelope+sine slope stays under ~0.35. Anything much larger
     // indicates a discontinuity (click) at the release point.
     REQUIRE (maxSlope < 0.5f);
+}
+// ---------------------------------------------------------------------------
+// Release envelope: the fade must start at the level the note was sounding at
+// and reach silence over Voice::releaseTime (80 ms), not jump straight to 0.
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Constant-valued sample: the envelope is then directly visible in the output. */
+aod::Sample makeDc (int length, float value)
+{
+    aod::Sample s;
+    s.data.assign (static_cast<std::size_t> (length), value);
+    s.sampleRate = kSampleRate;
+    return s;
+}
+
+struct ReleaseTrace
+{
+    float levelBeforeNoteOff = 0.0f;
+    std::vector<float> afterNoteOff;
+};
+
+/** Holds a looping DC note for holdSamples, releases it, and records 200 ms after. */
+ReleaseTrace traceRelease (std::int64_t holdSamples)
+{
+    aod::Sample sample = makeDc (kSampleRate, 0.5f);
+    sample.loopStart   = 0;
+    sample.loopEnd     = kSampleRate - 1;
+    sample.loopEnabled = true;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 1.0f);
+
+    constexpr int holdBlock = 4096;
+    std::vector<float> block (static_cast<std::size_t> (holdBlock));
+    std::int64_t rendered = 0;
+    while (rendered < holdSamples)
+    {
+        const auto n = static_cast<int> (std::min<std::int64_t> (holdBlock, holdSamples - rendered));
+        pool.render (block.data(), n, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        rendered += n;
+    }
+
+    ReleaseTrace trace;
+    trace.levelBeforeNoteOff = block[static_cast<std::size_t> (
+        (holdSamples % holdBlock == 0 ? holdBlock : holdSamples % holdBlock) - 1)];
+
+    pool.stop (60);
+
+    // 1 ms blocks so the fade shape is sampled finely across block boundaries.
+    constexpr int fineBlock = kSampleRate / 1000;
+    std::vector<float> fine (static_cast<std::size_t> (fineBlock));
+    for (int ms = 0; ms < 200; ++ms)
+    {
+        pool.render (fine.data(), fineBlock, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        trace.afterNoteOff.insert (trace.afterNoteOff.end(), fine.begin(), fine.end());
+    }
+    return trace;
+}
+
+void requireSmoothReleaseOverReleaseTime (const ReleaseTrace& trace)
+{
+    const float before = trace.levelBeforeNoteOff;
+    REQUIRE (before > 0.2f); // the note was actually sounding at sustain
+
+    const auto& out = trace.afterNoteOff;
+    const auto at = [&out] (double seconds) {
+        return out[static_cast<std::size_t> (seconds * static_cast<double> (kSampleRate))];
+    };
+
+    // No instant drop: the first sample after note-off is still at (nearly)
+    // the sustain level. The old code produced 0 here.
+    REQUIRE (out[0] > 0.9f * before);
+
+    // Halfway through the 80 ms ramp the note is clearly still fading, not gone.
+    REQUIRE (at (0.040) > 0.25f * before);
+    REQUIRE (at (0.040) < 0.75f * before);
+
+    // Monotonic and free of steps: a linear 80 ms fade from ~0.35 moves
+    // ~1e-4 per sample; an abrupt cut would be a step of ~0.3.
+    float maxStep = 0.0f;
+    float maxRise = 0.0f;
+    for (std::size_t i = 1; i < out.size(); ++i)
+    {
+        maxStep = std::max (maxStep, out[i - 1] - out[i]);
+        maxRise = std::max (maxRise, out[i] - out[i - 1]);
+    }
+    REQUIRE (maxRise <= 1.0e-6f);
+    REQUIRE (maxStep < 1.0e-3f);
+
+    // Still audible shortly before the release time elapses...
+    REQUIRE (at (0.070) > 1.0e-3f);
+    // ...and silent shortly after it, staying silent.
+    float tail = 0.0f;
+    for (std::size_t i = static_cast<std::size_t> (0.085 * kSampleRate); i < out.size(); ++i)
+        tail = std::max (tail, std::abs (out[i]));
+    REQUIRE (tail <= 1.0e-6f);
+}
+} // namespace
+
+TEST_CASE ("note-off fades from the sounding level to silence over the release time", "[dsp][voice][release]")
+{
+    requireSmoothReleaseOverReleaseTime (traceRelease (kSampleRate)); // 1 s hold, at sustain
+}
+
+TEST_CASE ("a note held for ten minutes still releases within the release time", "[dsp][voice][release]")
+{
+    // A float envelope clock stops advancing at 512 s (1/48000 is below half
+    // an ulp there), which froze the release fade so a long-held note never
+    // went silent. 10 minutes is past that point at any common sample rate.
+    requireSmoothReleaseOverReleaseTime (traceRelease (std::int64_t { 600 } * kSampleRate));
 }
