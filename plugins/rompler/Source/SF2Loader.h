@@ -20,6 +20,9 @@ public:
 
     bool loadFile(const juce::File& file);
 
+    /** The rate every sample was resampled to at load time. */
+    [[nodiscard]] int hostSampleRate() const noexcept { return hostSampleRate_; }
+
     /** Returns nullptr if no matching region/sample was found. */
     [[nodiscard]] Sample* getSample(int bank, int program, int key, int velocity) noexcept;
 

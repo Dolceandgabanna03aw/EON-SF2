@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "Sampler.h"
@@ -64,16 +65,16 @@ TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
     aod::VoicePool pool;
     const aod::Sample sample = makeTone();
 
-    // Positive velToDriveDb makes a hard hit (v=1.0) the reference and a soft
-    // hit quieter; neutral 0 leaves it untouched.
+    // Full drive with +100 % velocity-to-drive: a hard hit (v=1.0) gets the
+    // whole drive amount, a soft one almost none, and must stay quieter.
     pool.start (&sample, 60, 1.0f);
     std::vector<float> loud (static_cast<std::size_t> (kBlockSize));
-    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (loud.data(), kBlockSize, kSampleRate, 1.0f, 1.0f, 0, 0, 0.0f);
 
     pool.stopAll();
     pool.start (&sample, 60, 0.1f);
     std::vector<float> soft (static_cast<std::size_t> (kBlockSize));
-    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (soft.data(), kBlockSize, kSampleRate, 1.0f, 1.0f, 0, 0, 0.0f);
 
     REQUIRE (blockPeak (soft.data(), kBlockSize) < blockPeak (loud.data(), kBlockSize));
 }
@@ -352,4 +353,400 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // combined envelope+sine slope stays under ~0.35. Anything much larger
     // indicates a discontinuity (click) at the release point.
     REQUIRE (maxSlope < 0.5f);
+}
+// ---------------------------------------------------------------------------
+// Release envelope: the fade must start at the level the note was sounding at
+// and reach silence over Voice::releaseTime (80 ms), not jump straight to 0.
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Constant-valued sample: the envelope is then directly visible in the output. */
+aod::Sample makeDc (int length, float value)
+{
+    aod::Sample s;
+    s.data.assign (static_cast<std::size_t> (length), value);
+    s.sampleRate = kSampleRate;
+    return s;
+}
+
+struct ReleaseTrace
+{
+    float levelBeforeNoteOff = 0.0f;
+    std::vector<float> afterNoteOff;
+};
+
+/** Holds a looping DC note for holdSamples, releases it, and records 200 ms after. */
+ReleaseTrace traceRelease (std::int64_t holdSamples)
+{
+    aod::Sample sample = makeDc (kSampleRate, 0.5f);
+    sample.loopStart   = 0;
+    sample.loopEnd     = kSampleRate - 1;
+    sample.loopEnabled = true;
+
+    aod::VoicePool pool;
+    pool.start (&sample, 60, 1.0f);
+
+    constexpr int holdBlock = 4096;
+    std::vector<float> block (static_cast<std::size_t> (holdBlock));
+    std::int64_t rendered = 0;
+    while (rendered < holdSamples)
+    {
+        const auto n = static_cast<int> (std::min<std::int64_t> (holdBlock, holdSamples - rendered));
+        pool.render (block.data(), n, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        rendered += n;
+    }
+
+    ReleaseTrace trace;
+    trace.levelBeforeNoteOff = block[static_cast<std::size_t> (
+        (holdSamples % holdBlock == 0 ? holdBlock : holdSamples % holdBlock) - 1)];
+
+    pool.stop (60);
+
+    // 1 ms blocks so the fade shape is sampled finely across block boundaries.
+    constexpr int fineBlock = kSampleRate / 1000;
+    std::vector<float> fine (static_cast<std::size_t> (fineBlock));
+    for (int ms = 0; ms < 200; ++ms)
+    {
+        pool.render (fine.data(), fineBlock, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        trace.afterNoteOff.insert (trace.afterNoteOff.end(), fine.begin(), fine.end());
+    }
+    return trace;
+}
+
+void requireSmoothReleaseOverReleaseTime (const ReleaseTrace& trace)
+{
+    const float before = trace.levelBeforeNoteOff;
+    REQUIRE (before > 0.2f); // the note was actually sounding at sustain
+
+    const auto& out = trace.afterNoteOff;
+    const auto at = [&out] (double seconds) {
+        return out[static_cast<std::size_t> (seconds * static_cast<double> (kSampleRate))];
+    };
+
+    // No instant drop: the first sample after note-off is still at (nearly)
+    // the sustain level. The old code produced 0 here.
+    REQUIRE (out[0] > 0.9f * before);
+
+    // Halfway through the 80 ms ramp the note is clearly still fading, not gone.
+    REQUIRE (at (0.040) > 0.25f * before);
+    REQUIRE (at (0.040) < 0.75f * before);
+
+    // Monotonic and free of steps: a linear 80 ms fade from ~0.35 moves
+    // ~1e-4 per sample; an abrupt cut would be a step of ~0.3.
+    float maxStep = 0.0f;
+    float maxRise = 0.0f;
+    for (std::size_t i = 1; i < out.size(); ++i)
+    {
+        maxStep = std::max (maxStep, out[i - 1] - out[i]);
+        maxRise = std::max (maxRise, out[i] - out[i - 1]);
+    }
+    REQUIRE (maxRise <= 1.0e-6f);
+    REQUIRE (maxStep < 1.0e-3f);
+
+    // Still audible shortly before the release time elapses...
+    REQUIRE (at (0.070) > 1.0e-3f);
+    // ...and silent shortly after it, staying silent.
+    float tail = 0.0f;
+    for (std::size_t i = static_cast<std::size_t> (0.085 * kSampleRate); i < out.size(); ++i)
+        tail = std::max (tail, std::abs (out[i]));
+    REQUIRE (tail <= 1.0e-6f);
+}
+} // namespace
+
+TEST_CASE ("note-off fades from the sounding level to silence over the release time", "[dsp][voice][release]")
+{
+    requireSmoothReleaseOverReleaseTime (traceRelease (kSampleRate)); // 1 s hold, at sustain
+}
+
+TEST_CASE ("a note held for ten minutes still releases within the release time", "[dsp][voice][release]")
+{
+    // A float envelope clock stops advancing at 512 s (1/48000 is below half
+    // an ulp there), which froze the release fade so a long-held note never
+    // went silent. 10 minutes is past that point at any common sample rate.
+    requireSmoothReleaseOverReleaseTime (traceRelease (std::int64_t { 600 } * kSampleRate));
+}
+
+// ---------------------------------------------------------------------------
+// Loop wrap: a step larger than the loop length must still wrap inside the
+// loop, and the interpolation taps must never leave the buffer. Under the
+// asan preset the old single-subtraction wrap is a heap-buffer-overflow.
+// ---------------------------------------------------------------------------
+namespace
+{
+void requireBoundedLoopPlayback (const aod::Sample& sample, int note)
+{
+    aod::VoicePool pool;
+    pool.start (&sample, note, 1.0f);
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    bool allFinite = true;
+    float peak = 0.0f;
+    float lastBlockPeak = 0.0f;
+    for (int b = 0; b < 200; ++b)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        for (const float v : block)
+            allFinite = allFinite && std::isfinite (v);
+        lastBlockPeak = blockPeak (block.data(), kBlockSize);
+        peak = std::max (peak, lastBlockPeak);
+    }
+    REQUIRE (allFinite);
+    REQUIRE (peak <= 1.0f); // source is +-0.5; garbage reads would not stay bounded
+    // Still sounding after ~2 s, i.e. the loop kept wrapping instead of the
+    // voice running off the end of the sample.
+    REQUIRE (lastBlockPeak > 0.0f);
+}
+
+aod::Sample makeShortLoop (int length, int loopStart, int loopEnd)
+{
+    aod::Sample s;
+    s.data.resize (static_cast<std::size_t> (length));
+    for (int i = 0; i < length; ++i)
+        s.data[static_cast<std::size_t> (i)] = 0.5f * std::sin (0.1f * static_cast<float> (i));
+    s.sampleRate  = kSampleRate;
+    s.loopStart   = loopStart;
+    s.loopEnd     = loopEnd;
+    s.loopEnabled = true;
+    return s;
+}
+} // namespace
+
+TEST_CASE ("a short loop played far above its root key stays inside the buffer", "[dsp][voice][loop]")
+{
+    SECTION ("10-frame loop near the end, note 127 over root 0 (~1500 frames per sample)")
+    {
+        aod::Sample sample = makeShortLoop (1000, 900, 910);
+        sample.rootKey = 0.0f;
+        requireBoundedLoopPlayback (sample, 127);
+    }
+
+    SECTION ("loop ending on the last frame, step just over the loop length")
+    {
+        // 4-frame loop [995, 999], three octaves up: 8 frames per sample.
+        aod::Sample sample = makeShortLoop (1000, 995, 999);
+        sample.rootKey = 60.0f;
+        requireBoundedLoopPlayback (sample, 96);
+    }
+
+    SECTION ("hand-built loop end past the buffer is clamped, not trusted")
+    {
+        aod::Sample sample = makeShortLoop (1000, 990, 1050);
+        sample.rootKey = 0.0f;
+        requireBoundedLoopPlayback (sample, 127);
+    }
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+void renderBlocks (aod::VoicePool& pool, int blocks)
+{
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < blocks; ++b)
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+}
+} // namespace
+
+TEST_CASE ("voice stealing takes the oldest voice, not the newest", "[dsp][voice][steal]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+    pool.setPolyphony (3);
+
+    SECTION ("all voices sustaining: the first-started note is stolen")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 2);
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (60));
+        CHECK (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("a retriggered note counts as newly started")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1); // retrigger: now the newest
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK (pool.isNoteActive (60));
+        CHECK_FALSE (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("releasing voices are taken before sustaining ones, oldest release first")
+    {
+        // Arrange the slots so the older releasing voice sits at a higher
+        // index than the newer one; a first-match scan would pick the newer.
+        pool.start (&sample, 60, 0.5f); // slot 0
+        pool.start (&sample, 62, 0.5f); // slot 1
+        pool.start (&sample, 64, 0.5f); // slot 2
+        renderBlocks (pool, 1);
+        pool.stop (60);
+        renderBlocks (pool, 12); // > 80 ms release: slot 0 is idle again
+        REQUIRE_FALSE (pool.isNoteActive (60));
+
+        pool.start (&sample, 65, 0.5f); // slot 0, newest
+        renderBlocks (pool, 1);
+        pool.stop (65);
+        pool.stop (62);
+        renderBlocks (pool, 1); // both still inside their release tail
+        REQUIRE (pool.isNoteActive (62));
+        REQUIRE (pool.isNoteActive (65));
+
+        pool.start (&sample, 67, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (62)); // oldest releasing voice reused
+        CHECK (pool.isNoteActive (65));       // newer release tail left alone
+        CHECK (pool.isNoteActive (64));       // sustaining note untouched
+        CHECK (pool.isNoteActive (67));
+    }
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+struct LevelStats
+{
+    float peak = 0.0f;
+    float rms = 0.0f;
+    std::vector<float> samples;
+};
+
+/**
+    Fraction of a's energy that is not explained by a scaled copy of b
+    (1 - normalised cross-correlation squared). 0 for a pure gain change;
+    rises as the curve adds harmonics.
+*/
+double distortionAgainst (const std::vector<float>& a, const std::vector<float>& b)
+{
+    double ab = 0.0, aa = 0.0, bb = 0.0;
+    for (std::size_t i = 0; i < std::min (a.size(), b.size()); ++i)
+    {
+        ab += static_cast<double> (a[i]) * static_cast<double> (b[i]);
+        aa += static_cast<double> (a[i]) * static_cast<double> (a[i]);
+        bb += static_cast<double> (b[i]) * static_cast<double> (b[i]);
+    }
+    return 1.0 - (ab * ab) / (aa * bb);
+}
+
+/** Renders a note through the drive stage and measures 100 ms of its sustain. */
+LevelStats measureSustain (const aod::Sample& sample, float velocity, float drive, float velToDrive, int curve)
+{
+    aod::VoicePool pool;
+    pool.start (&sample, 60, velocity);
+
+    // 350 ms: past the 10 ms attack and 300 ms decay, onto the sustain.
+    constexpr int settle = kSampleRate * 35 / 100;
+    std::vector<float> scratch (static_cast<std::size_t> (settle));
+    pool.render (scratch.data(), settle, kSampleRate, drive, velToDrive, curve, 0, 0.0f);
+
+    constexpr int window = kSampleRate / 10;
+    std::vector<float> out (static_cast<std::size_t> (window));
+    pool.render (out.data(), window, kSampleRate, drive, velToDrive, curve, 0, 0.0f);
+
+    LevelStats stats;
+    double sumSquares = 0.0;
+    for (const float x : out)
+    {
+        stats.peak = std::max (stats.peak, std::abs (x));
+        sumSquares += static_cast<double> (x) * static_cast<double> (x);
+    }
+    stats.rms = static_cast<float> (std::sqrt (sumSquares / static_cast<double> (window)));
+    stats.samples = std::move (out);
+    return stats;
+}
+} // namespace
+
+TEST_CASE ("drive at 0 % is an exact clean bypass at any velocity", "[dsp][voice][drive]")
+{
+    aod::Sample sample = makeDc (kSampleRate, 0.5f);
+    sample.loopStart   = 0;
+    sample.loopEnd     = kSampleRate - 1;
+    sample.loopEnabled = true;
+
+    for (const float velocity : { 1.0f, 0.5f, 0.1f })
+        for (const float velToDrive : { -1.0f, 0.0f, 1.0f })
+            for (const int curve : { 0, 1, 2 })
+            {
+                CAPTURE (velocity, velToDrive, curve);
+                const auto stats = measureSustain (sample, velocity, 0.0f, velToDrive, curve);
+                // DC 0.5 x velocity x 0.7 sustain, untouched by any curve.
+                REQUIRE (std::abs (stats.peak - 0.5f * velocity * 0.7f) < 1.0e-4f);
+            }
+}
+
+TEST_CASE ("raising drive saturates and gets louder instead of collapsing", "[dsp][voice][drive]")
+{
+    const aod::Sample sample = makeTone();
+
+    for (const int curve : { 0, 1, 2 })
+    {
+        CAPTURE (curve);
+        // Velocity 0.5: a 0.35 peak on the sustain, a typical playing level.
+        const auto clean = measureSustain (sample, 0.5f, 0.0f, 0.0f, curve);
+        REQUIRE (clean.peak > 0.3f);
+
+        float previousRms = clean.rms;
+        for (const float drive : { 0.25f, 0.5f, 0.75f, 1.0f })
+        {
+            CAPTURE (drive);
+            const auto driven = measureSustain (sample, 0.5f, drive, 0.0f, curve);
+            CHECK (driven.rms > previousRms);  // monotonically louder
+            CHECK (driven.peak < 0.8f);        // but peaks stay bounded
+            previousRms = driven.rms;
+        }
+
+        // Fully driven: clearly louder, and audibly reshaped (well over 1 %
+        // of the energy in harmonics), i.e. saturated rather than turned up.
+        const auto full = measureSustain (sample, 0.5f, 1.0f, 0.0f, curve);
+        CHECK (full.rms > clean.rms * 1.4f);
+        CHECK (distortionAgainst (full.samples, clean.samples) > 0.01);
+        CHECK (distortionAgainst (clean.samples, clean.samples) < 1.0e-9);
+    }
+
+    SECTION ("a full-scale note loses at most a few dB at full drive")
+    {
+        for (const int curve : { 0, 1, 2 })
+        {
+            CAPTURE (curve);
+            const auto clean = measureSustain (sample, 1.0f, 0.0f, 0.0f, curve);
+            const auto full = measureSustain (sample, 1.0f, 1.0f, 0.0f, curve);
+            CHECK (full.rms > clean.rms * 0.7f); // > -3.1 dB
+            CHECK (full.peak < clean.peak * 1.01f);
+        }
+    }
+}
+
+TEST_CASE ("a sample not at the host rate still plays at its recorded pitch", "[dsp][voice][resample]")
+{
+    // The tone is 1 kHz at 48 kHz; declared as 24 kHz it is really a 500 Hz
+    // recording. The processor normally resamples banks to the host rate, but
+    // if a rebuild after a rate change fails, the voice must compensate.
+    aod::Sample sample = makeTone();
+    sample.sampleRate = kSampleRate / 2;
+
+    aod::VoicePool pool (1);
+    pool.start (&sample, 60, 1.0f);
+    std::vector<float> out (static_cast<std::size_t> (kSampleRate / 2)); // 0.5 s
+    pool.render (out.data(), static_cast<int> (out.size()), kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    int upward = 0;
+    for (std::size_t i = 1; i < out.size(); ++i)
+        if (out[i - 1] < 0.0f && out[i] >= 0.0f)
+            ++upward;
+    CAPTURE (upward);
+    CHECK (std::abs (upward - 250) <= 2); // 500 Hz for 0.5 s
 }

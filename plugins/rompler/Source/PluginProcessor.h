@@ -2,8 +2,10 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <cstdint>
 #include <queue>
 #include <mutex>
+#include <optional>
 #include <tuple>
 
 #include "Parameters.h"
@@ -73,6 +75,17 @@ public:
 
     [[nodiscard]] juce::String getLoadedFileName() const noexcept { return loadedFileName_; }
 
+    /**
+        Full path of the user-chosen SoundFont this session refers to: the
+        last file passed to loadSoundFont() or restored from saved state.
+        Empty when only the bundled font (or nothing) is loaded. Kept even
+        if the restored file is missing, so re-saving does not lose it.
+    */
+    [[nodiscard]] juce::String getSoundFontPath() const;
+
+    /** Loaders replaced while audio may still have been reading them. Exposed for tests. */
+    [[nodiscard]] std::size_t getRetiredLoaderCount() const noexcept { return retiredLoaders_.size(); }
+
     [[nodiscard]] int getPresetCount() const noexcept;
     [[nodiscard]] juce::String getPresetName (int presetIndex) const noexcept;
     [[nodiscard]] std::pair<int, int> getPresetBankProgram (int presetIndex) const noexcept;
@@ -95,6 +108,18 @@ public:
     void postNote (int note, bool on, int velocity = 100);
 
 private:
+    /**
+        Builds a loader at the current sample rate and publishes it.
+        bankProgram selects the preset afterwards (nullptr = first preset).
+        rememberPath records the file as the session's SoundFont (false for the
+        bundled font, which is found again at startup rather than saved).
+    */
+    bool loadSoundFontInternal (const juce::File& file, const std::pair<int, int>* bankProgram,
+                                bool rememberPath);
+
+    /** Frees retired loaders once the audio thread can no longer reference them. */
+    void freeRetiredLoadersIfUnused();
+
     /** Cap on buffered message-thread note events; see postNote(). */
     static constexpr std::size_t maxQueuedNotes = 256;
 
@@ -106,6 +131,18 @@ private:
     std::unique_ptr<SF2Loader> sf2Loader_;
     std::atomic<SF2Loader*> activeLoader_ { nullptr };
     std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
+
+    // Retired-loader reclamation. The audio thread notes the first block in
+    // which it sees a new activeLoader_ (and the voice-pool start stamp at
+    // that moment); once no voice started at or before that stamp is still
+    // active, nothing can reference an older loader's samples, and it
+    // publishes the loader in acknowledgedLoader_. The message thread then
+    // frees retiredLoaders_ before the next swap. Audio-thread-only state is
+    // reset in prepareToPlay(), where the audio thread is stopped.
+    std::atomic<SF2Loader*> acknowledgedLoader_ { nullptr };
+    SF2Loader* lastSeenLoader_ = nullptr;
+    std::uint64_t loaderSwitchStamp_ = 0;
+    bool prepared_ = false;
 
     std::unique_ptr<VoicePool> voicePool_;
     BusProcessor busProcessor_;
@@ -125,6 +162,19 @@ private:
     std::mutex noteQueueMutex_;
 
     juce::String loadedFileName_;
+
+    // The file the current loader was built from (bundled or user), used to
+    // rebuild it when the sample rate changes. Message thread only.
+    juce::File loadedFile_;
+
+    // Session SoundFont path for get/setStateInformation. Guarded because
+    // some hosts save state from a background thread.
+    mutable std::mutex soundFontPathMutex_;
+    juce::String soundFontPath_;
+
+    // Preset restored from state while no bank could be loaded yet; applied
+    // when the bundled font loads in prepareToPlay(). Message thread only.
+    std::optional<std::pair<int, int>> pendingBankProgram_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)
 };
