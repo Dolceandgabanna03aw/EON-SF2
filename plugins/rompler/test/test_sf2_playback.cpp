@@ -5,6 +5,7 @@
 #include "Sf2Builder.h"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace
@@ -34,6 +35,94 @@ public:
 private:
     juce::TemporaryFile file_;
 };
+
+/**
+    One preset -> one instrument -> one looping sample recorded at sourceRate.
+    The builder's PCM is a ramp (frame i = i * 100), so frames must stay below
+    ~327 for the ramp to stay monotonic; a value read back identifies its frame.
+*/
+class LoopingSf2Fixture
+{
+public:
+    LoopingSf2Fixture (std::uint32_t sourceRate, std::uint32_t frames,
+                       std::uint32_t loopStart, std::uint32_t loopEnd)
+        : file_ (".sf2")
+    {
+        using namespace x10::sf2::test;
+        Sf2Builder builder;
+        builder.sampleFrames = frames;
+
+        BuilderInstrument instrument;
+        instrument.name = "Looping";
+        instrument.zones.push_back (BuilderZone { { { 54, 1 },     // sampleModes: loop continuously
+                                                    { 53, 0 } } }); // sampleID -> 0
+        builder.instruments.push_back (instrument);
+
+        BuilderSample sample;
+        sample.name       = "Ramp";
+        sample.start      = 0;
+        sample.end        = frames;
+        sample.loopStart  = loopStart;
+        sample.loopEnd    = loopEnd;
+        sample.sampleRate = sourceRate;
+        builder.samples.push_back (sample);
+
+        const auto bytes = builder.build();
+        REQUIRE (file_.getFile().replaceWithData (bytes.data(), bytes.size()));
+    }
+
+    [[nodiscard]] const juce::File& file() const noexcept { return file_.getFile(); }
+
+private:
+    juce::TemporaryFile file_;
+};
+
+void setParameter (aod::RomplerProcessor& processor, const juce::String& id, float value)
+{
+    auto* parameter = processor.getValueTreeState().getParameter (id);
+    REQUIRE (parameter != nullptr);
+    parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+}
+
+double rmsOf (const juce::AudioBuffer<float>& buffer, int channel, int start, int length)
+{
+    double sum = 0.0;
+    for (int i = start; i < start + length; ++i)
+        sum += static_cast<double> (buffer.getSample (channel, i)) * static_cast<double> (buffer.getSample (channel, i));
+    return std::sqrt (sum / static_cast<double> (length));
+}
+
+/** Plays one note for `seconds` through a fresh processor with the FX sends off. */
+juce::AudioBuffer<float> renderNote (const juce::File& bank, float drivePercent, float velToDrivePercent,
+                                     int velocity, double seconds)
+{
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+    processor.loadSoundFont (bank);
+    REQUIRE (processor.getPresetCount() == 1);
+
+    setParameter (processor, aod::ParamIDs::fxChorusMix, 0.0f);
+    setParameter (processor, aod::ParamIDs::fxReverbMix, 0.0f);
+    setParameter (processor, aod::ParamIDs::voiceDrive, drivePercent);
+    setParameter (processor, aod::ParamIDs::voiceVelToDrive, velToDrivePercent);
+
+    const int total = static_cast<int> (seconds * kSampleRate) / kBlockSize * kBlockSize;
+    juce::AudioBuffer<float> out (2, total);
+    juce::AudioBuffer<float> block (2, kBlockSize);
+    for (int pos = 0; pos < total; pos += kBlockSize)
+    {
+        juce::MidiBuffer midi;
+        if (pos == 0)
+            midi.addEvent (juce::MidiMessage::noteOn (1, 60, static_cast<juce::uint8> (velocity)), 0);
+        block.clear();
+        processor.processBlock (block, midi);
+        for (int ch = 0; ch < 2; ++ch)
+            out.copyFrom (ch, pos, block, ch, 0, kBlockSize);
+    }
+    processor.releaseResources();
+    return out;
+}
 } // namespace
 
 TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf2][m1]")
@@ -187,4 +276,31 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
     REQUIRE (zcB > 20);
     const double ratio = static_cast<double> (zcB) / static_cast<double> (zcA);
     REQUIRE (std::abs (ratio - expectedRatio) < 0.2);
+}
+
+TEST_CASE ("the Drive knob saturates louder instead of collapsing to silence", "[sf2][drive]")
+{
+    const LoopingSf2Fixture bank (48000, 300, 20, 280);
+
+    // 0.4 s: past attack and decay; measure the last 100 ms of sustain.
+    constexpr double seconds = 0.4;
+    const int window = static_cast<int> (kSampleRate) / 10;
+
+    double previous = 0.0;
+    for (const float drive : { 0.0f, 20.0f, 50.0f, 100.0f })
+    {
+        CAPTURE (drive);
+        const auto out = renderNote (bank.file(), drive, 0.0f, 80, seconds);
+        const int start = out.getNumSamples() - window;
+        const double rms = rmsOf (out, 0, start, window);
+        CAPTURE (rms, previous);
+
+        CHECK (rms > 0.1);                 // never collapses toward silence
+        CHECK (rms >= previous);           // more drive is never quieter
+        // Loose bound: the voice-level drive tests pin the peak precisely.
+        // Here the FX stage still sits after the voice, and juce::Reverb
+        // applies its internal 2x dry scale even with the reverb mix at 0.
+        CHECK (out.getMagnitude (0, 0, out.getNumSamples()) < 2.0f);
+        previous = rms;
+    }
 }

@@ -116,9 +116,12 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const auto filterRoutingParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterRouting);
     const auto filterOffsetParam = apvts_.getRawParameterValue(ParamIDs::voiceFilterOffset);
     const auto polyLimitParam = apvts_.getRawParameterValue(ParamIDs::polyLimit);
-    const float driveDb = driveParam ? driveParam->load() : 0.0f;
+    // Drive and Velocity-to-Drive are percentages; the voice wants 0..1 and
+    // -1..1. (They used to be passed through as dB, so 20 % meant +20 dB of
+    // pre-gain followed by a -20 dB divide.) See Voice::render for the mapping.
+    const float driveAmount = driveParam ? driveParam->load() / 100.0f : 0.0f;
     const int curveId = curveParam ? static_cast<int>(curveParam->load()) : 0;
-    const float velToDriveDb = velToDriveParam ? velToDriveParam->load() : 0.0f;
+    const float velToDrive = velToDriveParam ? velToDriveParam->load() / 100.0f : 0.0f;
     const int filterRouting = filterRoutingParam ? static_cast<int>(filterRoutingParam->load()) : 0;
     const float filterOffsetCents = filterOffsetParam ? filterOffsetParam->load() : 0.0f;
 
@@ -130,7 +133,7 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         const int rangeLength = endSample - startSample;
         if (rangeLength > 0)
             voicePool_->render (outL + startSample, rangeLength, static_cast<int> (sampleRate_),
-                                driveDb, velToDriveDb, curveId, filterRouting, filterOffsetCents);
+                                driveAmount, velToDrive, curveId, filterRouting, filterOffsetCents);
     };
 
     int renderedUntil = 0;

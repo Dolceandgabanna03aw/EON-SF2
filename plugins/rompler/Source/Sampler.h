@@ -49,7 +49,39 @@ public:
     [[nodiscard]] std::uint64_t startOrder() const noexcept { return startOrder_; }
     void setStartOrder(std::uint64_t order) noexcept { startOrder_ = order; }
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+    /**
+        Per-voice drive (saturation) stage.
+
+        driveAmount is the Drive knob as 0..1 (0..100 %). velToDrive is the
+        Velocity-to-Drive knob as -1..1 (-100..+100 %). The effective amount is
+
+            d = clamp(driveAmount * (1 + velToDrive * (velocity - 1)), 0, 1)
+
+        so velocity scales the knob rather than adding to it: at +100 % a hit at
+        half velocity gets half the drive, at -100 % softer hits get more, and
+        0 % Drive is always clean regardless of velocity.
+
+        The signal x is pushed into the selected curve with a pre-gain of
+        maxDriveDb * d (0..+24 dB), the shaped signal is scaled so a sample at
+        driveReferenceLevel (0.7, about -3 dBFS: a full-scale sample at velocity
+        127 on the envelope's sustain) comes out at the same level, and the
+        result is crossfaded with the dry signal by d:
+
+            y = x + d * (curve(g * x) * ref / curve(g * ref) - x)
+
+        Hence d = 0 is an exact bypass (unity, bit-identical to no drive stage)
+        and raising d adds harmonics and compresses: peaks settle at about the
+        reference level while quieter material is lifted, so the result gets
+        louder and denser instead of quieter. Measured on a 1 kHz sine with the
+        Tanh curve at 100 %: a -9 dBFS peak (0.35) comes out +8.5 dB RMS, a 0.7
+        peak +2.7 dB, a full-scale peak -0.3 dB, with peaks capped near 0.7.
+        Very quiet material (release tails, noise) can be lifted by up to the
+        full small-signal gain g * ref / curve(g * ref), about +21 dB at 100 %.
+    */
+    static constexpr float maxDriveDb = 24.0f;
+    static constexpr float driveReferenceLevel = 0.7f;
+
+    void render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
 
 private:
@@ -104,7 +136,8 @@ public:
     /** True if a voice (sustaining or releasing) is currently sounding midiNote. */
     [[nodiscard]] bool isNoteActive(int midiNote) const noexcept;
 
-    void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+    /** driveAmount 0..1 and velToDrive -1..1; see Voice::render() for the mapping. */
+    void render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
 
 private:

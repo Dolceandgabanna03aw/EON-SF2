@@ -74,7 +74,7 @@ float Voice::envelope() const noexcept
     return sustainLevel;
 }
 
-void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+void Voice::render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                     int curveId, int filterRouting, float filterOffsetCents) noexcept
 {
     if (!active_ || sample_ == nullptr || sample_->data.empty())
@@ -97,11 +97,23 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
     const double invHostSampleRate = 1.0 / static_cast<double>(hostSampleRate);
 
-    // Velocity shapes the drive amount: velToDriveDb at 0% is neutral, +100%
-    // makes hard hits drive harder and -100% does the inverse. This is an
-    // additional dB offset centred so a velocity of 127 (1.0) is the reference.
-    const float velDriveDb = driveDb + velToDriveDb * (velocity_ - 1.0f);
-    const float driveGain = std::pow (10.0f, velDriveDb / 20.0f);
+    // Drive stage (see the mapping documented on Voice::render in Sampler.h).
+    // Velocity scales the knob amount; velocity 1.0 (127) is the reference.
+    const float drive = std::clamp (driveAmount * (1.0f + velToDrive * (velocity_ - 1.0f)), 0.0f, 1.0f);
+    const bool driveActive = drive > 0.0f;
+    const float driveGain = std::pow (10.0f, drive * maxDriveDb / 20.0f);
+    auto shape = [curveId] (float x) noexcept
+    {
+        if (curveId == 1)
+            return x10::dsp::curves::Tube::f (x);
+        if (curveId == 2)
+            return x10::dsp::curves::Transformer::f (x);
+        return x10::dsp::curves::Tanh::f (x); // curveId == 0 or unknown
+    };
+    // Every curve is odd-ish, monotonic and positive for positive input, so
+    // shape(g * ref) > 0 and the makeup gain is finite.
+    const float driveMakeup = driveActive ? driveReferenceLevel / shape (driveGain * driveReferenceLevel)
+                                          : 1.0f;
 
     // Loop points as sample-frame indices into sampleData. While looping, phase_
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
@@ -166,14 +178,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         if (filterRouting == 0) // Pre: filter before drive
             sample = filter_.process (sample);
 
-        // Apply nonlinear drive based on curve ID
-        const float driven = driveGain * sample;
-        if (curveId == 1)
-            sample = x10::dsp::curves::Tube::f (driven) / driveGain;
-        else if (curveId == 2)
-            sample = x10::dsp::curves::Transformer::f (driven) / driveGain;
-        else // curveId == 0 or default
-            sample = x10::dsp::curves::Tanh::f (driven) / driveGain;
+        // Saturate, level-match at the reference, and blend by the amount:
+        // drive == 0 leaves the sample untouched.
+        if (driveActive)
+        {
+            const float shaped = shape (driveGain * sample) * driveMakeup;
+            sample += drive * (shaped - sample);
+        }
 
         if (filterRouting != 0) // Post: filter after drive
             sample = filter_.process (sample);
@@ -293,7 +304,7 @@ Voice* VoicePool::findFreeVoice() noexcept
     return oldest;
 }
 
-void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                         int curveId, int filterRouting, float filterOffsetCents) noexcept
 {
     std::fill(output, output + numSamples, 0.0f);
@@ -301,7 +312,7 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
     for (std::size_t i = 0; i < limit; ++i)
         if (voices_[i].isActive())
-            voices_[i].render(output, numSamples, hostSampleRate, driveDb, velToDriveDb, curveId, filterRouting, filterOffsetCents);
+            voices_[i].render(output, numSamples, hostSampleRate, driveAmount, velToDrive, curveId, filterRouting, filterOffsetCents);
 }
 
 } // namespace aod

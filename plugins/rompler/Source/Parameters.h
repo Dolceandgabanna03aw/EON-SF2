@@ -56,6 +56,11 @@ inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x" };
     const auto decibel = String (" dB");
     const auto hertz   = String (" Hz");
 
+    // Drive 0..100 % maps to a 0..1 saturation amount (0..+24 dB into the
+    // curve, level-matched at about -3 dBFS, blended with dry by the same amount);
+    // 0 % is a clean bypass. Velocity to Drive -100..+100 % scales that amount
+    // by velocity. IDs and ranges are unchanged so old sessions still load.
+    // Full mapping: Voice::render in Sampler.h.
     layout.add (std::make_unique<AudioParameterFloat> (
         ParameterID { ParamIDs::voiceDrive, 1 }, "Drive",
         NormalisableRange<float> { 0.0f, 100.0f, 0.01f }, 20.0f,
