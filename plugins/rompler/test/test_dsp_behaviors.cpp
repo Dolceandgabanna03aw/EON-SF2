@@ -465,3 +465,74 @@ TEST_CASE ("a note held for ten minutes still releases within the release time",
     // went silent. 10 minutes is past that point at any common sample rate.
     requireSmoothReleaseOverReleaseTime (traceRelease (std::int64_t { 600 } * kSampleRate));
 }
+
+// ---------------------------------------------------------------------------
+// Loop wrap: a step larger than the loop length must still wrap inside the
+// loop, and the interpolation taps must never leave the buffer. Under the
+// asan preset the old single-subtraction wrap is a heap-buffer-overflow.
+// ---------------------------------------------------------------------------
+namespace
+{
+void requireBoundedLoopPlayback (const aod::Sample& sample, int note)
+{
+    aod::VoicePool pool;
+    pool.start (&sample, note, 1.0f);
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    bool allFinite = true;
+    float peak = 0.0f;
+    float lastBlockPeak = 0.0f;
+    for (int b = 0; b < 200; ++b)
+    {
+        std::fill (block.begin(), block.end(), 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        for (const float v : block)
+            allFinite = allFinite && std::isfinite (v);
+        lastBlockPeak = blockPeak (block.data(), kBlockSize);
+        peak = std::max (peak, lastBlockPeak);
+    }
+    REQUIRE (allFinite);
+    REQUIRE (peak <= 1.0f); // source is +-0.5; garbage reads would not stay bounded
+    // Still sounding after ~2 s, i.e. the loop kept wrapping instead of the
+    // voice running off the end of the sample.
+    REQUIRE (lastBlockPeak > 0.0f);
+}
+
+aod::Sample makeShortLoop (int length, int loopStart, int loopEnd)
+{
+    aod::Sample s;
+    s.data.resize (static_cast<std::size_t> (length));
+    for (int i = 0; i < length; ++i)
+        s.data[static_cast<std::size_t> (i)] = 0.5f * std::sin (0.1f * static_cast<float> (i));
+    s.sampleRate  = kSampleRate;
+    s.loopStart   = loopStart;
+    s.loopEnd     = loopEnd;
+    s.loopEnabled = true;
+    return s;
+}
+} // namespace
+
+TEST_CASE ("a short loop played far above its root key stays inside the buffer", "[dsp][voice][loop]")
+{
+    SECTION ("10-frame loop near the end, note 127 over root 0 (~1500 frames per sample)")
+    {
+        aod::Sample sample = makeShortLoop (1000, 900, 910);
+        sample.rootKey = 0.0f;
+        requireBoundedLoopPlayback (sample, 127);
+    }
+
+    SECTION ("loop ending on the last frame, step just over the loop length")
+    {
+        // 4-frame loop [995, 999], three octaves up: 8 frames per sample.
+        aod::Sample sample = makeShortLoop (1000, 995, 999);
+        sample.rootKey = 60.0f;
+        requireBoundedLoopPlayback (sample, 96);
+    }
+
+    SECTION ("hand-built loop end past the buffer is clamped, not trusted")
+    {
+        aod::Sample sample = makeShortLoop (1000, 990, 1050);
+        sample.rootKey = 0.0f;
+        requireBoundedLoopPlayback (sample, 127);
+    }
+}

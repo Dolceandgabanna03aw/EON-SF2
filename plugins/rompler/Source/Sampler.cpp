@@ -107,9 +107,16 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
     // the end of the sample; releasing ignores the loop and plays the tail out
     // past loopEnd_ so the release envelope has real data to fade.
-    const bool looping = loopEnabled_ && !releasing_;
-    const auto loopStart = static_cast<std::int64_t>(loopStart_);
-    const auto loopEnd = static_cast<std::int64_t>(loopEnd_);
+    //
+    // loopEnd is clamped to the last frame here as well as in the loader: a
+    // Sample can be built by hand (tests, future importers), and the wrap
+    // below must never land outside the buffer. If clamping collapses the
+    // loop, the voice simply plays through as a one-shot.
+    const auto lastFrame = sampleCount - 1;
+    const auto loopStart = std::clamp<std::int64_t> (loopStart_, 0, std::max<std::int64_t> (lastFrame, 0));
+    const auto loopEnd = std::clamp<std::int64_t> (loopEnd_, 0, std::max<std::int64_t> (lastFrame, 0));
+    const bool looping = loopEnabled_ && !releasing_ && loopEnd > loopStart + 1;
+    const auto loopLength = static_cast<double> (loopEnd - loopStart);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -134,12 +141,15 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             }
         }
 
-        const auto index = static_cast<std::int64_t>(phase_);
-        const float frac = static_cast<float>(phase_ - static_cast<double>(index));
+        // Both interpolation taps are clamped into [0, lastFrame]. The loop
+        // and end-of-data logic should already keep phase_ in range; this is
+        // the last line of defence against an out-of-bounds read.
+        const auto index = std::clamp<std::int64_t> (static_cast<std::int64_t>(phase_), 0, lastFrame);
+        const float frac = std::clamp (static_cast<float>(phase_ - static_cast<double>(index)), 0.0f, 1.0f);
         const float s0 = sampleData[static_cast<std::size_t>(index)];
         // Reading s1 needs one sample of headroom; a releasing voice holds
-        // phase_ at sampleCount - 1, so clamp here to stay in bounds.
-        const auto s1Index = (index + 1 < sampleCount) ? index + 1 : sampleCount - 1;
+        // phase_ at lastFrame, so clamp here to stay in bounds.
+        const auto s1Index = std::min<std::int64_t> (index + 1, lastFrame);
         const float s1 = sampleData[static_cast<std::size_t>(s1Index)];
         const float interpolated = s0 + frac * (s1 - s0);
 
@@ -172,11 +182,15 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         phase_ += playRate_;
 
-        // Wrap the loop: once the read position passes loopEnd_, continue from
-        // loopStart_ keeping the fractional part, so the interpolation phase is
-        // continuous across the wrap and the loop does not click.
+        // Wrap the loop: once the read position passes loopEnd, continue from
+        // loopStart keeping the fractional part, so the interpolation phase is
+        // continuous across the wrap and the loop does not click. fmod rather
+        // than a single subtraction: a high note on a short loop can advance
+        // further than one loop length per sample, and one subtraction would
+        // then leave phase_ past loopEnd (and past the buffer end).
         if (looping && phase_ >= static_cast<double>(loopEnd))
-            phase_ -= static_cast<double>(loopEnd - loopStart);
+            phase_ = static_cast<double>(loopStart)
+                   + std::fmod (phase_ - static_cast<double>(loopStart), loopLength);
 
         envPhase_ += invHostSampleRate;
     }
