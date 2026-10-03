@@ -215,6 +215,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         && voices_[static_cast<std::size_t>(existing)].isActive())
     {
         voices_[static_cast<std::size_t>(existing)].start (sample, midiNote, velocity);
+        voices_[static_cast<std::size_t>(existing)].setStartOrder (++nextStartOrder_);
         return;
     }
 
@@ -223,6 +224,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         return;
 
     voice->start (sample, midiNote, velocity);
+    voice->setStartOrder (++nextStartOrder_);
     noteToVoice_[static_cast<std::size_t>(midiNote)] =
         static_cast<int>(voice - voices_.data());
 }
@@ -247,9 +249,20 @@ void VoicePool::stopAll() noexcept
         voice.stop();
 }
 
+bool VoicePool::isNoteActive(int midiNote) const noexcept
+{
+    const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
+    for (std::size_t i = 0; i < limit; ++i)
+        if (voices_[i].isActive() && voices_[i].note() == midiNote)
+            return true;
+    return false;
+}
+
 Voice* VoicePool::findFreeVoice() noexcept
 {
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
+    if (limit == 0)
+        return nullptr;
 
     // First pass: an entirely idle slot.
     for (std::size_t i = 0; i < limit; ++i)
@@ -258,21 +271,26 @@ Voice* VoicePool::findFreeVoice() noexcept
 
     // Second pass: a slot still rendering its release tail. Reallocating it is
     // preferable to silently dropping the new note, and re-triggering merely
-    // overrides the fade with the fresh attack.
+    // overrides the fade with the fresh attack. Among several releasing
+    // voices take the one started longest ago: it has faded the furthest.
+    Voice* oldestReleasing = nullptr;
     for (std::size_t i = 0; i < limit; ++i)
-        if (voices_[i].isReleasing())
-            return &voices_[i];
+        if (voices_[i].isReleasing()
+            && (oldestReleasing == nullptr || voices_[i].startOrder() < oldestReleasing->startOrder()))
+            oldestReleasing = &voices_[i];
+    if (oldestReleasing != nullptr)
+        return oldestReleasing;
 
     // Third pass: the whole pool is busy with sustained notes. Steal the
-    // *oldest* active voice so the new note is never silently dropped; the
-    // oldest has decayed the furthest, so it is the least audible victim.
+    // voice that was started longest ago (smallest start stamp) so the new
+    // note is never silently dropped and the most recent notes keep playing.
     // (Voice::start() rewrites all state, so the steal is click-free apart
-    // from the natural note cut.)
-    std::size_t oldest = 0;
+    // from the natural note cut.) No allocation: a linear scan over <= 32 slots.
+    Voice* oldest = &voices_[0];
     for (std::size_t i = 1; i < limit; ++i)
-        if (voices_[i].isActive())
-            oldest = i;
-    return &voices_[oldest];
+        if (voices_[i].startOrder() < oldest->startOrder())
+            oldest = &voices_[i];
+    return oldest;
 }
 
 void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,

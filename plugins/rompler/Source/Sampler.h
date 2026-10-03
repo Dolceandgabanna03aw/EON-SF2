@@ -43,8 +43,11 @@ public:
     [[nodiscard]] bool isReleasing() const noexcept { return active_ && releasing_; }
     /** The note this voice is currently sounding (or -1 once it has no note). */
     [[nodiscard]] int note() const noexcept { return midiNote_; }
-    /** How far the envelope has run; used to pick the oldest voice when stealing. */
+    /** How far the envelope has run, in seconds since the last start(). */
     [[nodiscard]] double envPhase() const noexcept { return envPhase_; }
+    /** Monotonic stamp handed out by the pool at start(); smaller = started earlier. */
+    [[nodiscard]] std::uint64_t startOrder() const noexcept { return startOrder_; }
+    void setStartOrder(std::uint64_t order) noexcept { startOrder_ = order; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
@@ -55,6 +58,7 @@ private:
     float velocity_ = 0.0f;
     bool active_ = false;
     int midiNote_ = -1;
+    std::uint64_t startOrder_ = 0;
     // Envelope time in seconds. double, not float: a float accumulating
     // 1/sampleRate stops advancing once it reaches 512 s (the increment falls
     // below half an ulp), which would freeze the release of a long-held note
@@ -97,6 +101,9 @@ public:
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
+    /** True if a voice (sustaining or releasing) is currently sounding midiNote. */
+    [[nodiscard]] bool isNoteActive(int midiNote) const noexcept;
+
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
 
@@ -104,6 +111,10 @@ private:
     std::vector<Voice> voices_;
     std::array<int, 128> noteToVoice_ {};
     int polyphony_ = static_cast<int>(voices_.size());
+    // Incremented on every start() (including retriggers) and stamped onto the
+    // voice, so stealing can pick the voice that was started longest ago.
+    // 64-bit: at 1000 notes per second it would take ~585 million years to wrap.
+    std::uint64_t nextStartOrder_ = 0;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;
 };

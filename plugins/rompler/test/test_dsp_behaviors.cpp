@@ -536,3 +536,81 @@ TEST_CASE ("a short loop played far above its root key stays inside the buffer",
         requireBoundedLoopPlayback (sample, 127);
     }
 }
+
+// ---------------------------------------------------------------------------
+namespace
+{
+void renderBlocks (aod::VoicePool& pool, int blocks)
+{
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < blocks; ++b)
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+}
+} // namespace
+
+TEST_CASE ("voice stealing takes the oldest voice, not the newest", "[dsp][voice][steal]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+    pool.setPolyphony (3);
+
+    SECTION ("all voices sustaining: the first-started note is stolen")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 2);
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (60));
+        CHECK (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("a retriggered note counts as newly started")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1); // retrigger: now the newest
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK (pool.isNoteActive (60));
+        CHECK_FALSE (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("releasing voices are taken before sustaining ones, oldest release first")
+    {
+        // Arrange the slots so the older releasing voice sits at a higher
+        // index than the newer one; a first-match scan would pick the newer.
+        pool.start (&sample, 60, 0.5f); // slot 0
+        pool.start (&sample, 62, 0.5f); // slot 1
+        pool.start (&sample, 64, 0.5f); // slot 2
+        renderBlocks (pool, 1);
+        pool.stop (60);
+        renderBlocks (pool, 12); // > 80 ms release: slot 0 is idle again
+        REQUIRE_FALSE (pool.isNoteActive (60));
+
+        pool.start (&sample, 65, 0.5f); // slot 0, newest
+        renderBlocks (pool, 1);
+        pool.stop (65);
+        pool.stop (62);
+        renderBlocks (pool, 1); // both still inside their release tail
+        REQUIRE (pool.isNoteActive (62));
+        REQUIRE (pool.isNoteActive (65));
+
+        pool.start (&sample, 67, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (62)); // oldest releasing voice reused
+        CHECK (pool.isNoteActive (65));       // newer release tail left alone
+        CHECK (pool.isNoteActive (64));       // sustaining note untouched
+        CHECK (pool.isNoteActive (67));
+    }
+}
