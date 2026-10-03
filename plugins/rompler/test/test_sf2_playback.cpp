@@ -304,3 +304,66 @@ TEST_CASE ("the Drive knob saturates louder instead of collapsing to silence", "
         previous = rms;
     }
 }
+
+TEST_CASE ("loop points follow the sample when it is resampled to the host rate", "[sf2][loop][resample]")
+{
+    constexpr std::uint32_t frames = 300, loopStart = 60, loopEnd = 240;
+    constexpr int hostRate = 48000;
+    const float sourceStep = 100.0f / 32768.0f; // ramp increment per source frame
+
+    for (const std::uint32_t sourceRate : { 22050u, 44100u, 48000u, 96000u })
+    {
+        CAPTURE (sourceRate);
+        const LoopingSf2Fixture bank (sourceRate, frames, loopStart, loopEnd);
+
+        aod::SF2Loader loader (hostRate);
+        REQUIRE (loader.loadFile (bank.file()));
+        const auto [b, p] = loader.firstPresetProgram();
+        const aod::Sample* sample = loader.getSample (b, p, 60, 100);
+        REQUIRE (sample != nullptr);
+        REQUIRE (sample->loopEnabled);
+
+        const double ratio = static_cast<double> (hostRate) / static_cast<double> (sourceRate);
+        CHECK (std::abs (sample->loopStart - static_cast<double> (loopStart) * ratio) <= 1.0);
+        CHECK (std::abs (sample->loopEnd - static_cast<double> (loopEnd) * ratio) <= 1.0);
+
+        // The frames at the loop points still carry the source frames' values:
+        // the loop covers the same audio, not a different stretch of it.
+        REQUIRE (sample->loopEnd < static_cast<int> (sample->data.size()));
+        CHECK (std::abs (sample->data[static_cast<std::size_t> (sample->loopStart)]
+                         - static_cast<float> (loopStart) * sourceStep) <= sourceStep);
+        CHECK (std::abs (sample->data[static_cast<std::size_t> (sample->loopEnd)]
+                         - static_cast<float> (loopEnd) * sourceStep) <= sourceStep);
+    }
+}
+
+TEST_CASE ("a resampled loop repeats at the source loop's rate", "[sf2][loop][resample]")
+{
+    // 180-frame loop at 22.05 kHz: 122.5 repetitions per second at the root key.
+    const LoopingSf2Fixture bank (22050, 300, 60, 240);
+    aod::SF2Loader loader (48000);
+    REQUIRE (loader.loadFile (bank.file()));
+    const auto [b, p] = loader.firstPresetProgram();
+    const aod::Sample* sample = loader.getSample (b, p, 60, 100);
+    REQUIRE (sample != nullptr);
+
+    aod::VoicePool pool (1);
+    pool.start (sample, 60, 1.0f);
+    std::vector<float> out (48000);
+    pool.render (out.data(), static_cast<int> (out.size()), 48000, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    // The ramp drops sharply only where the loop wraps back to its start.
+    // The voice filter rings for a few samples after each drop, so drops
+    // closer together than 32 samples count as one wrap.
+    int wraps = 0;
+    std::size_t lastWrap = 0;
+    for (std::size_t i = 4800; i < out.size(); ++i) // skip the attack
+        if (out[i] < out[i - 1] - 0.05f && i - lastWrap > 32)
+        {
+            ++wraps;
+            lastWrap = i;
+        }
+    const double perSecond = wraps / 0.9;
+    CAPTURE (wraps, perSecond);
+    CHECK (std::abs (perSecond - 22050.0 / 180.0) < 2.0);
+}

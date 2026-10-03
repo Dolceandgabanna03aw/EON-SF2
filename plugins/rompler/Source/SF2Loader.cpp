@@ -1,5 +1,7 @@
 #include "SF2Loader.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace aod
@@ -134,11 +136,13 @@ std::pair<int, int> SF2Loader::presetBankProgram(int presetIndex) const noexcept
 
 void SF2Loader::resampleToHostRate(Sample& sample)
 {
-    if (sample.sampleRate == hostSampleRate_ || sample.data.empty())
+    if (sample.sampleRate == hostSampleRate_ || sample.data.empty() || sample.sampleRate <= 0)
         return;
 
-    const float ratio = static_cast<float>(hostSampleRate_) / static_cast<float>(sample.sampleRate);
-    const auto newSize = static_cast<std::size_t>(static_cast<float>(sample.data.size()) * ratio);
+    // double, not float: the same ratio also rescales the loop points below,
+    // and float phase accumulates audible error over long samples.
+    const double ratio = static_cast<double>(hostSampleRate_) / static_cast<double>(sample.sampleRate);
+    const auto newSize = static_cast<std::size_t>(static_cast<double>(sample.data.size()) * ratio);
     if (newSize == 0)
         return;
 
@@ -146,7 +150,7 @@ void SF2Loader::resampleToHostRate(Sample& sample)
 
     for (std::size_t i = 0; i < newSize; ++i)
     {
-        const float phase = static_cast<float>(i) / ratio;
+        const double phase = static_cast<double>(i) / ratio;
         const auto index = static_cast<std::size_t>(phase);
 
         if (index >= sample.data.size() - 1)
@@ -155,12 +159,26 @@ void SF2Loader::resampleToHostRate(Sample& sample)
         }
         else
         {
-            const float frac = phase - static_cast<float>(index);
+            const auto frac = static_cast<float>(phase - static_cast<double>(index));
             const float s0 = sample.data[index];
             const float s1 = sample.data[index + 1];
             resampled[i] = s0 + frac * (s1 - s0);
         }
     }
+
+    // Loop points are frame indices into data, so they live in the source
+    // rate too and must move with the resampled frames. Left unscaled, a
+    // 22.05 kHz sample on a 48 kHz host looped over the first ~46 % of the
+    // intended region: wrong pitch, wrong timbre, and clicks at the wrap.
+    // (Start/end offsets are already baked into data by convertPcmRange(),
+    // so loopStart/loopEnd are the only frame positions left to convert.)
+    const auto maxFrame = static_cast<std::int64_t>(newSize) - 1;
+    auto rescale = [ratio] (int frame) noexcept
+    {
+        return static_cast<std::int64_t>(std::llround(static_cast<double>(frame) * ratio));
+    };
+    sample.loopEnd = static_cast<int>(std::clamp<std::int64_t>(rescale(sample.loopEnd), 0, std::max<std::int64_t>(maxFrame, 0)));
+    sample.loopStart = static_cast<int>(std::clamp<std::int64_t>(rescale(sample.loopStart), 0, std::max<std::int64_t>(maxFrame - 1, 0)));
 
     sample.data = std::move(resampled);
     sample.sampleRate = hostSampleRate_;
