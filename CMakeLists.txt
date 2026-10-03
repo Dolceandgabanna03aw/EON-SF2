@@ -19,7 +19,7 @@ option(X10_SANITIZE      "Enable ASan + UBSan on x10 targets"        OFF)
 # x10_dsp itself must never depend on JUCE (plan D1). JUCE is fetched only when
 # a plugin target is actually being built, which keeps the DSP test cycle at
 # under a second and keeps the licence boundary obvious.
-set(X10_JUCE_TAG "8.0.14" CACHE STRING "JUCE version pin for plugin targets")
+set(X10_JUCE_TAG "9.0.3" CACHE STRING "JUCE version pin for plugin targets")
 
 enable_testing()
 
