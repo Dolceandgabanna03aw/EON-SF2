@@ -39,9 +39,13 @@ void Voice::stop() noexcept
 {
     if (!active_ || releasing_)
         return;
-    releasing_ = true;
-    releasePhase_ = envPhase_;
+    // Capture the level *before* flagging the release: envelope() takes the
+    // release branch once releasing_ is set, and would then report the stale
+    // releaseLevel_ (0 after start()), so the fade began at zero — an
+    // instantaneous cut to silence on every note-off.
     releaseLevel_ = envelope();
+    releasePhase_ = envPhase_;
+    releasing_ = true;
 }
 
 float Voice::envelope() const noexcept
@@ -50,29 +54,24 @@ float Voice::envelope() const noexcept
     constexpr float decayTime = 0.3f;
     constexpr float sustainLevel = 0.7f;
 
-    float level;
-    if (envPhase_ < attackTime)
-        level = envPhase_ / attackTime;
-    else if (envPhase_ < attackTime + decayTime)
-        level = 1.0f - (envPhase_ - attackTime) / decayTime * (1.0f - sustainLevel);
-    else
-        level = sustainLevel;
-
     if (releasing_)
     {
-        // Scale the release ramp duration by the level at release time: a note
-        // released mid-attack (level 0.5) fades over half the nominal release
-        // time, so the *slope* of the fade is the same as a full-level release.
-        // A fixed-time ramp from a low level is a much sharper slope and clicks;
-        // this keeps the fade audibly consistent whatever the release level.
-        const float rampTime = releaseTime * std::max (releaseLevel_, 0.05f);
-        const float t = (envPhase_ - releasePhase_) / rampTime;
+        // Linear fade from the level captured at note-off down to zero over
+        // releaseTime. A lower starting level fades with a gentler slope, so
+        // a release mid-attack never produces a steeper edge than a release
+        // from full level.
+        const auto t = static_cast<float> ((envPhase_ - releasePhase_) / static_cast<double> (releaseTime));
         if (t >= 1.0f)
             return 0.0f;
         return releaseLevel_ * (1.0f - t);
     }
 
-    return level;
+    const auto phase = static_cast<float> (envPhase_);
+    if (phase < attackTime)
+        return phase / attackTime;
+    if (phase < attackTime + decayTime)
+        return 1.0f - (phase - attackTime) / decayTime * (1.0f - sustainLevel);
+    return sustainLevel;
 }
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
@@ -96,7 +95,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     const float* sampleData = sample_->data.data();
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
-    const float invHostSampleRate = 1.0f / static_cast<float>(hostSampleRate);
+    const double invHostSampleRate = 1.0 / static_cast<double>(hostSampleRate);
 
     // Velocity shapes the drive amount: velToDriveDb at 0% is neutral, +100%
     // makes hard hits drive harder and -100% does the inverse. This is an
@@ -108,9 +107,16 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
     // the end of the sample; releasing ignores the loop and plays the tail out
     // past loopEnd_ so the release envelope has real data to fade.
-    const bool looping = loopEnabled_ && !releasing_;
-    const auto loopStart = static_cast<std::int64_t>(loopStart_);
-    const auto loopEnd = static_cast<std::int64_t>(loopEnd_);
+    //
+    // loopEnd is clamped to the last frame here as well as in the loader: a
+    // Sample can be built by hand (tests, future importers), and the wrap
+    // below must never land outside the buffer. If clamping collapses the
+    // loop, the voice simply plays through as a one-shot.
+    const auto lastFrame = sampleCount - 1;
+    const auto loopStart = std::clamp<std::int64_t> (loopStart_, 0, std::max<std::int64_t> (lastFrame, 0));
+    const auto loopEnd = std::clamp<std::int64_t> (loopEnd_, 0, std::max<std::int64_t> (lastFrame, 0));
+    const bool looping = loopEnabled_ && !releasing_ && loopEnd > loopStart + 1;
+    const auto loopLength = static_cast<double> (loopEnd - loopStart);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -135,12 +141,15 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             }
         }
 
-        const auto index = static_cast<std::int64_t>(phase_);
-        const float frac = static_cast<float>(phase_ - static_cast<double>(index));
+        // Both interpolation taps are clamped into [0, lastFrame]. The loop
+        // and end-of-data logic should already keep phase_ in range; this is
+        // the last line of defence against an out-of-bounds read.
+        const auto index = std::clamp<std::int64_t> (static_cast<std::int64_t>(phase_), 0, lastFrame);
+        const float frac = std::clamp (static_cast<float>(phase_ - static_cast<double>(index)), 0.0f, 1.0f);
         const float s0 = sampleData[static_cast<std::size_t>(index)];
         // Reading s1 needs one sample of headroom; a releasing voice holds
-        // phase_ at sampleCount - 1, so clamp here to stay in bounds.
-        const auto s1Index = (index + 1 < sampleCount) ? index + 1 : sampleCount - 1;
+        // phase_ at lastFrame, so clamp here to stay in bounds.
+        const auto s1Index = std::min<std::int64_t> (index + 1, lastFrame);
         const float s1 = sampleData[static_cast<std::size_t>(s1Index)];
         const float interpolated = s0 + frac * (s1 - s0);
 
@@ -148,7 +157,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         // Deactivate once the release fade has fully ramped to zero; the
         // envelope becomes 0.0 at that point, so stop burning samples early.
-        if (releasing_ && envPhase_ - releasePhase_ >= releaseTime)
+        if (releasing_ && envPhase_ - releasePhase_ >= static_cast<double> (releaseTime))
         {
             active_ = false;
             break;
@@ -173,11 +182,15 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         phase_ += playRate_;
 
-        // Wrap the loop: once the read position passes loopEnd_, continue from
-        // loopStart_ keeping the fractional part, so the interpolation phase is
-        // continuous across the wrap and the loop does not click.
+        // Wrap the loop: once the read position passes loopEnd, continue from
+        // loopStart keeping the fractional part, so the interpolation phase is
+        // continuous across the wrap and the loop does not click. fmod rather
+        // than a single subtraction: a high note on a short loop can advance
+        // further than one loop length per sample, and one subtraction would
+        // then leave phase_ past loopEnd (and past the buffer end).
         if (looping && phase_ >= static_cast<double>(loopEnd))
-            phase_ -= static_cast<double>(loopEnd - loopStart);
+            phase_ = static_cast<double>(loopStart)
+                   + std::fmod (phase_ - static_cast<double>(loopStart), loopLength);
 
         envPhase_ += invHostSampleRate;
     }

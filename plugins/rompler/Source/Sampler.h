@@ -32,7 +32,7 @@ struct Sample
 class Voice
 {
 public:
-    /** Short fade-out time used by the attack stage when a key is released during it. */
+    /** Linear fade-out time after a note-off, from whatever level the envelope was at. */
     static constexpr float releaseTime = 0.08f;
 
     void start(const Sample* sample, int midiNote, float velocity) noexcept;
@@ -44,7 +44,7 @@ public:
     /** The note this voice is currently sounding (or -1 once it has no note). */
     [[nodiscard]] int note() const noexcept { return midiNote_; }
     /** How far the envelope has run; used to pick the oldest voice when stealing. */
-    [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
+    [[nodiscard]] double envPhase() const noexcept { return envPhase_; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents) noexcept;
@@ -55,10 +55,14 @@ private:
     float velocity_ = 0.0f;
     bool active_ = false;
     int midiNote_ = -1;
-    float envPhase_ = 0.0f;
+    // Envelope time in seconds. double, not float: a float accumulating
+    // 1/sampleRate stops advancing once it reaches 512 s (the increment falls
+    // below half an ulp), which would freeze the release of a long-held note
+    // and leave it ringing forever.
+    double envPhase_ = 0.0;
     bool releasing_ = false;
     float releaseLevel_ = 0.0f;
-    float releasePhase_ = 0.0f;
+    double releasePhase_ = 0.0;
 
     // Loop state: while looping (not releasing), phase_ wraps back to
     // loopStart_ once it passes loopEnd_. Cleared by start() so a retriggered
