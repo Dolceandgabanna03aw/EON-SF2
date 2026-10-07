@@ -74,7 +74,7 @@ float Voice::envelope() const noexcept
     return sustainLevel;
 }
 
-void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+void Voice::render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                     int curveId, int filterRouting, float filterOffsetCents) noexcept
 {
     if (!active_ || sample_ == nullptr || sample_->data.empty())
@@ -97,11 +97,23 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
     const double invHostSampleRate = 1.0 / static_cast<double>(hostSampleRate);
 
-    // Velocity shapes the drive amount: velToDriveDb at 0% is neutral, +100%
-    // makes hard hits drive harder and -100% does the inverse. This is an
-    // additional dB offset centred so a velocity of 127 (1.0) is the reference.
-    const float velDriveDb = driveDb + velToDriveDb * (velocity_ - 1.0f);
-    const float driveGain = std::pow (10.0f, velDriveDb / 20.0f);
+    // Drive stage (see the mapping documented on Voice::render in Sampler.h).
+    // Velocity scales the knob amount; velocity 1.0 (127) is the reference.
+    const float drive = std::clamp (driveAmount * (1.0f + velToDrive * (velocity_ - 1.0f)), 0.0f, 1.0f);
+    const bool driveActive = drive > 0.0f;
+    const float driveGain = std::pow (10.0f, drive * maxDriveDb / 20.0f);
+    auto shape = [curveId] (float x) noexcept
+    {
+        if (curveId == 1)
+            return x10::dsp::curves::Tube::f (x);
+        if (curveId == 2)
+            return x10::dsp::curves::Transformer::f (x);
+        return x10::dsp::curves::Tanh::f (x); // curveId == 0 or unknown
+    };
+    // Every curve is odd-ish, monotonic and positive for positive input, so
+    // shape(g * ref) > 0 and the makeup gain is finite.
+    const float driveMakeup = driveActive ? driveReferenceLevel / shape (driveGain * driveReferenceLevel)
+                                          : 1.0f;
 
     // Loop points as sample-frame indices into sampleData. While looping, phase_
     // wraps from loopEnd_ back to loopStart_ so sustained notes never run off
@@ -117,6 +129,13 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const auto loopEnd = std::clamp<std::int64_t> (loopEnd_, 0, std::max<std::int64_t> (lastFrame, 0));
     const bool looping = loopEnabled_ && !releasing_ && loopEnd > loopStart + 1;
     const auto loopLength = static_cast<double> (loopEnd - loopStart);
+
+    // Source frames to advance per output sample. The loader normally
+    // resamples every sample to the host rate (ratio 1), but this keeps the
+    // pitch right if the host rate has changed since.
+    const double sourceRate = sample_->sampleRate > 0 ? static_cast<double> (sample_->sampleRate)
+                                                      : static_cast<double> (hostSampleRate);
+    const double step = playRate_ * sourceRate / static_cast<double> (hostSampleRate);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -166,21 +185,20 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         if (filterRouting == 0) // Pre: filter before drive
             sample = filter_.process (sample);
 
-        // Apply nonlinear drive based on curve ID
-        const float driven = driveGain * sample;
-        if (curveId == 1)
-            sample = x10::dsp::curves::Tube::f (driven) / driveGain;
-        else if (curveId == 2)
-            sample = x10::dsp::curves::Transformer::f (driven) / driveGain;
-        else // curveId == 0 or default
-            sample = x10::dsp::curves::Tanh::f (driven) / driveGain;
+        // Saturate, level-match at the reference, and blend by the amount:
+        // drive == 0 leaves the sample untouched.
+        if (driveActive)
+        {
+            const float shaped = shape (driveGain * sample) * driveMakeup;
+            sample += drive * (shaped - sample);
+        }
 
         if (filterRouting != 0) // Post: filter after drive
             sample = filter_.process (sample);
 
         output[i] += sample;
 
-        phase_ += playRate_;
+        phase_ += step;
 
         // Wrap the loop: once the read position passes loopEnd, continue from
         // loopStart keeping the fractional part, so the interpolation phase is
@@ -215,6 +233,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         && voices_[static_cast<std::size_t>(existing)].isActive())
     {
         voices_[static_cast<std::size_t>(existing)].start (sample, midiNote, velocity);
+        voices_[static_cast<std::size_t>(existing)].setStartOrder (++nextStartOrder_);
         return;
     }
 
@@ -223,6 +242,7 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexce
         return;
 
     voice->start (sample, midiNote, velocity);
+    voice->setStartOrder (++nextStartOrder_);
     noteToVoice_[static_cast<std::size_t>(midiNote)] =
         static_cast<int>(voice - voices_.data());
 }
@@ -247,9 +267,28 @@ void VoicePool::stopAll() noexcept
         voice.stop();
 }
 
+bool VoicePool::isNoteActive(int midiNote) const noexcept
+{
+    const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
+    for (std::size_t i = 0; i < limit; ++i)
+        if (voices_[i].isActive() && voices_[i].note() == midiNote)
+            return true;
+    return false;
+}
+
+bool VoicePool::anyActiveStartedAtOrBefore(std::uint64_t stamp) const noexcept
+{
+    for (const auto& voice : voices_)
+        if (voice.isActive() && voice.startOrder() <= stamp)
+            return true;
+    return false;
+}
+
 Voice* VoicePool::findFreeVoice() noexcept
 {
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
+    if (limit == 0)
+        return nullptr;
 
     // First pass: an entirely idle slot.
     for (std::size_t i = 0; i < limit; ++i)
@@ -258,24 +297,29 @@ Voice* VoicePool::findFreeVoice() noexcept
 
     // Second pass: a slot still rendering its release tail. Reallocating it is
     // preferable to silently dropping the new note, and re-triggering merely
-    // overrides the fade with the fresh attack.
+    // overrides the fade with the fresh attack. Among several releasing
+    // voices take the one started longest ago: it has faded the furthest.
+    Voice* oldestReleasing = nullptr;
     for (std::size_t i = 0; i < limit; ++i)
-        if (voices_[i].isReleasing())
-            return &voices_[i];
+        if (voices_[i].isReleasing()
+            && (oldestReleasing == nullptr || voices_[i].startOrder() < oldestReleasing->startOrder()))
+            oldestReleasing = &voices_[i];
+    if (oldestReleasing != nullptr)
+        return oldestReleasing;
 
     // Third pass: the whole pool is busy with sustained notes. Steal the
-    // *oldest* active voice so the new note is never silently dropped; the
-    // oldest has decayed the furthest, so it is the least audible victim.
+    // voice that was started longest ago (smallest start stamp) so the new
+    // note is never silently dropped and the most recent notes keep playing.
     // (Voice::start() rewrites all state, so the steal is click-free apart
-    // from the natural note cut.)
-    std::size_t oldest = 0;
+    // from the natural note cut.) No allocation: a linear scan over <= 32 slots.
+    Voice* oldest = &voices_[0];
     for (std::size_t i = 1; i < limit; ++i)
-        if (voices_[i].isActive())
-            oldest = i;
-    return &voices_[oldest];
+        if (voices_[i].startOrder() < oldest->startOrder())
+            oldest = &voices_[i];
+    return oldest;
 }
 
-void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
+void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                         int curveId, int filterRouting, float filterOffsetCents) noexcept
 {
     std::fill(output, output + numSamples, 0.0f);
@@ -283,7 +327,7 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
     for (std::size_t i = 0; i < limit; ++i)
         if (voices_[i].isActive())
-            voices_[i].render(output, numSamples, hostSampleRate, driveDb, velToDriveDb, curveId, filterRouting, filterOffsetCents);
+            voices_[i].render(output, numSamples, hostSampleRate, driveAmount, velToDrive, curveId, filterRouting, filterOffsetCents);
 }
 
 } // namespace aod

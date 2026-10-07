@@ -65,16 +65,16 @@ TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
     aod::VoicePool pool;
     const aod::Sample sample = makeTone();
 
-    // Positive velToDriveDb makes a hard hit (v=1.0) the reference and a soft
-    // hit quieter; neutral 0 leaves it untouched.
+    // Full drive with +100 % velocity-to-drive: a hard hit (v=1.0) gets the
+    // whole drive amount, a soft one almost none, and must stay quieter.
     pool.start (&sample, 60, 1.0f);
     std::vector<float> loud (static_cast<std::size_t> (kBlockSize));
-    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (loud.data(), kBlockSize, kSampleRate, 1.0f, 1.0f, 0, 0, 0.0f);
 
     pool.stopAll();
     pool.start (&sample, 60, 0.1f);
     std::vector<float> soft (static_cast<std::size_t> (kBlockSize));
-    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (soft.data(), kBlockSize, kSampleRate, 1.0f, 1.0f, 0, 0, 0.0f);
 
     REQUIRE (blockPeak (soft.data(), kBlockSize) < blockPeak (loud.data(), kBlockSize));
 }
@@ -535,4 +535,218 @@ TEST_CASE ("a short loop played far above its root key stays inside the buffer",
         sample.rootKey = 0.0f;
         requireBoundedLoopPlayback (sample, 127);
     }
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+void renderBlocks (aod::VoicePool& pool, int blocks)
+{
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < blocks; ++b)
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+}
+} // namespace
+
+TEST_CASE ("voice stealing takes the oldest voice, not the newest", "[dsp][voice][steal]")
+{
+    aod::VoicePool pool;
+    const aod::Sample sample = makeTone();
+    pool.setPolyphony (3);
+
+    SECTION ("all voices sustaining: the first-started note is stolen")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 2);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 2);
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (60));
+        CHECK (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("a retriggered note counts as newly started")
+    {
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 62, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 64, 0.5f); renderBlocks (pool, 1);
+        pool.start (&sample, 60, 0.5f); renderBlocks (pool, 1); // retrigger: now the newest
+
+        pool.start (&sample, 66, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK (pool.isNoteActive (60));
+        CHECK_FALSE (pool.isNoteActive (62));
+        CHECK (pool.isNoteActive (64));
+        CHECK (pool.isNoteActive (66));
+    }
+
+    SECTION ("releasing voices are taken before sustaining ones, oldest release first")
+    {
+        // Arrange the slots so the older releasing voice sits at a higher
+        // index than the newer one; a first-match scan would pick the newer.
+        pool.start (&sample, 60, 0.5f); // slot 0
+        pool.start (&sample, 62, 0.5f); // slot 1
+        pool.start (&sample, 64, 0.5f); // slot 2
+        renderBlocks (pool, 1);
+        pool.stop (60);
+        renderBlocks (pool, 12); // > 80 ms release: slot 0 is idle again
+        REQUIRE_FALSE (pool.isNoteActive (60));
+
+        pool.start (&sample, 65, 0.5f); // slot 0, newest
+        renderBlocks (pool, 1);
+        pool.stop (65);
+        pool.stop (62);
+        renderBlocks (pool, 1); // both still inside their release tail
+        REQUIRE (pool.isNoteActive (62));
+        REQUIRE (pool.isNoteActive (65));
+
+        pool.start (&sample, 67, 0.5f);
+        renderBlocks (pool, 1);
+
+        CHECK_FALSE (pool.isNoteActive (62)); // oldest releasing voice reused
+        CHECK (pool.isNoteActive (65));       // newer release tail left alone
+        CHECK (pool.isNoteActive (64));       // sustaining note untouched
+        CHECK (pool.isNoteActive (67));
+    }
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+struct LevelStats
+{
+    float peak = 0.0f;
+    float rms = 0.0f;
+    std::vector<float> samples;
+};
+
+/**
+    Fraction of a's energy that is not explained by a scaled copy of b
+    (1 - normalised cross-correlation squared). 0 for a pure gain change;
+    rises as the curve adds harmonics.
+*/
+double distortionAgainst (const std::vector<float>& a, const std::vector<float>& b)
+{
+    double ab = 0.0, aa = 0.0, bb = 0.0;
+    for (std::size_t i = 0; i < std::min (a.size(), b.size()); ++i)
+    {
+        ab += static_cast<double> (a[i]) * static_cast<double> (b[i]);
+        aa += static_cast<double> (a[i]) * static_cast<double> (a[i]);
+        bb += static_cast<double> (b[i]) * static_cast<double> (b[i]);
+    }
+    return 1.0 - (ab * ab) / (aa * bb);
+}
+
+/** Renders a note through the drive stage and measures 100 ms of its sustain. */
+LevelStats measureSustain (const aod::Sample& sample, float velocity, float drive, float velToDrive, int curve)
+{
+    aod::VoicePool pool;
+    pool.start (&sample, 60, velocity);
+
+    // 350 ms: past the 10 ms attack and 300 ms decay, onto the sustain.
+    constexpr int settle = kSampleRate * 35 / 100;
+    std::vector<float> scratch (static_cast<std::size_t> (settle));
+    pool.render (scratch.data(), settle, kSampleRate, drive, velToDrive, curve, 0, 0.0f);
+
+    constexpr int window = kSampleRate / 10;
+    std::vector<float> out (static_cast<std::size_t> (window));
+    pool.render (out.data(), window, kSampleRate, drive, velToDrive, curve, 0, 0.0f);
+
+    LevelStats stats;
+    double sumSquares = 0.0;
+    for (const float x : out)
+    {
+        stats.peak = std::max (stats.peak, std::abs (x));
+        sumSquares += static_cast<double> (x) * static_cast<double> (x);
+    }
+    stats.rms = static_cast<float> (std::sqrt (sumSquares / static_cast<double> (window)));
+    stats.samples = std::move (out);
+    return stats;
+}
+} // namespace
+
+TEST_CASE ("drive at 0 % is an exact clean bypass at any velocity", "[dsp][voice][drive]")
+{
+    aod::Sample sample = makeDc (kSampleRate, 0.5f);
+    sample.loopStart   = 0;
+    sample.loopEnd     = kSampleRate - 1;
+    sample.loopEnabled = true;
+
+    for (const float velocity : { 1.0f, 0.5f, 0.1f })
+        for (const float velToDrive : { -1.0f, 0.0f, 1.0f })
+            for (const int curve : { 0, 1, 2 })
+            {
+                CAPTURE (velocity, velToDrive, curve);
+                const auto stats = measureSustain (sample, velocity, 0.0f, velToDrive, curve);
+                // DC 0.5 x velocity x 0.7 sustain, untouched by any curve.
+                REQUIRE (std::abs (stats.peak - 0.5f * velocity * 0.7f) < 1.0e-4f);
+            }
+}
+
+TEST_CASE ("raising drive saturates and gets louder instead of collapsing", "[dsp][voice][drive]")
+{
+    const aod::Sample sample = makeTone();
+
+    for (const int curve : { 0, 1, 2 })
+    {
+        CAPTURE (curve);
+        // Velocity 0.5: a 0.35 peak on the sustain, a typical playing level.
+        const auto clean = measureSustain (sample, 0.5f, 0.0f, 0.0f, curve);
+        REQUIRE (clean.peak > 0.3f);
+
+        float previousRms = clean.rms;
+        for (const float drive : { 0.25f, 0.5f, 0.75f, 1.0f })
+        {
+            CAPTURE (drive);
+            const auto driven = measureSustain (sample, 0.5f, drive, 0.0f, curve);
+            CHECK (driven.rms > previousRms);  // monotonically louder
+            CHECK (driven.peak < 0.8f);        // but peaks stay bounded
+            previousRms = driven.rms;
+        }
+
+        // Fully driven: clearly louder, and audibly reshaped (well over 1 %
+        // of the energy in harmonics), i.e. saturated rather than turned up.
+        const auto full = measureSustain (sample, 0.5f, 1.0f, 0.0f, curve);
+        CHECK (full.rms > clean.rms * 1.4f);
+        CHECK (distortionAgainst (full.samples, clean.samples) > 0.01);
+        CHECK (distortionAgainst (clean.samples, clean.samples) < 1.0e-9);
+    }
+
+    SECTION ("a full-scale note loses at most a few dB at full drive")
+    {
+        for (const int curve : { 0, 1, 2 })
+        {
+            CAPTURE (curve);
+            const auto clean = measureSustain (sample, 1.0f, 0.0f, 0.0f, curve);
+            const auto full = measureSustain (sample, 1.0f, 1.0f, 0.0f, curve);
+            CHECK (full.rms > clean.rms * 0.7f); // > -3.1 dB
+            CHECK (full.peak < clean.peak * 1.01f);
+        }
+    }
+}
+
+TEST_CASE ("a sample not at the host rate still plays at its recorded pitch", "[dsp][voice][resample]")
+{
+    // The tone is 1 kHz at 48 kHz; declared as 24 kHz it is really a 500 Hz
+    // recording. The processor normally resamples banks to the host rate, but
+    // if a rebuild after a rate change fails, the voice must compensate.
+    aod::Sample sample = makeTone();
+    sample.sampleRate = kSampleRate / 2;
+
+    aod::VoicePool pool (1);
+    pool.start (&sample, 60, 1.0f);
+    std::vector<float> out (static_cast<std::size_t> (kSampleRate / 2)); // 0.5 s
+    pool.render (out.data(), static_cast<int> (out.size()), kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+
+    int upward = 0;
+    for (std::size_t i = 1; i < out.size(); ++i)
+        if (out[i - 1] < 0.0f && out[i] >= 0.0f)
+            ++upward;
+    CAPTURE (upward);
+    CHECK (std::abs (upward - 250) <= 2); // 500 Hz for 0.5 s
 }
