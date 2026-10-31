@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <tuple>
 
 namespace aod
 {
@@ -46,25 +49,58 @@ bool SF2Loader::loadFile(const juce::File& file)
 
     samples_.clear();
 
+    // Keyed by the resolved PCM range plus its source rate. A std::map over a
+    // tuple, not a hand-combined hash: a collision here would silently hand two
+    // unrelated regions the same audio, which is a correctness bug wearing a
+    // performance optimization's clothes. At ~1,400 entries the lookup cost is
+    // noise next to what it replaces.
+    std::map<std::tuple<std::uint32_t, std::uint32_t, int>, SharedPcm> pcmCache;
+
     for (const auto& preset : presets)
     {
         for (const auto& region : preset.regions)
         {
+            const int sourceRate = static_cast<int>(region.sampleRateHz);
+
+            const auto key = std::make_tuple(region.start, region.end, sourceRate);
+            auto cached = pcmCache.find(key);
+            if (cached == pcmCache.end())
+                cached = pcmCache
+                             .emplace(key, buildSharedPcm(rawBank.sampleData, region.start,
+                                                          region.end, sourceRate))
+                             .first;
+            const SharedPcm& pcm = cached->second;
+
             Sample sample;
-            sample.sampleRate = static_cast<int>(region.sampleRateHz);
-            sample.data = convertPcmRange(rawBank.sampleData, region.start, region.end);
+            sample.data = pcm.data;
+            sample.sampleRate = pcm.resampled ? hostSampleRate_ : sourceRate;
             sample.loopStart = static_cast<int>(region.loopStart > region.start
                                                      ? region.loopStart - region.start : 0);
             sample.loopEnd = static_cast<int>(region.loopEnd > region.start
                                                    ? region.loopEnd - region.start : 0);
+            // Loop points arrive as source-rate frames, so when the shared
+            // buffer was resampled they have to move with it. Left unscaled, a
+            // 22.05 kHz sample on a 48 kHz host looped over the first ~46 % of
+            // the intended region. Only the loop points are per-region here;
+            // the audio itself is shared.
+            if (pcm.resampled)
+            {
+                const auto rescale = [ratio = pcm.resampleRatio] (int frame) noexcept
+                {
+                    return static_cast<std::int64_t>(
+                        std::llround(static_cast<double>(frame) * ratio));
+                };
+                sample.loopEnd = static_cast<int>(rescale(sample.loopEnd));
+                sample.loopStart = static_cast<int>(rescale(sample.loopStart));
+            }
             // Loop points may exceed the loaded playback range in malformed
             // files (endLoop past end). Clamp them so the loop wraps inside the
             // buffer and a release tail never reads out of bounds.
-            if (sample.data.size() >= 2)
+            if (pcm.data != nullptr && pcm.data->size() >= 2)
             {
-                const auto maxFrame = static_cast<int> (sample.data.size() - 1);
-                sample.loopEnd = std::min (sample.loopEnd, maxFrame);
-                sample.loopStart = std::min (sample.loopStart, maxFrame - 1);
+                const auto maxFrame = static_cast<int>(pcm.data->size() - 1);
+                sample.loopEnd = std::min(sample.loopEnd, maxFrame);
+                sample.loopStart = std::min(sample.loopStart, maxFrame - 1);
             }
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
             sample.filterCutoffHz = region.filterCutoffHz;
@@ -72,8 +108,6 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.rootKey = region.rootKey;
             sample.tuneCents = region.tuneCents;
             sample.scaleTuningCentsPerKey = region.scaleTuningCentsPerKey;
-
-            resampleToHostRate(sample);
 
             samples_.emplace(&region, std::move(sample));
         }
@@ -134,17 +168,29 @@ std::pair<int, int> SF2Loader::presetBankProgram(int presetIndex) const noexcept
     return { preset.bank, preset.program };
 }
 
-void SF2Loader::resampleToHostRate(Sample& sample)
+SF2Loader::SharedPcm SF2Loader::buildSharedPcm(std::span<const std::byte> sampleData,
+                                               std::uint32_t start, std::uint32_t end,
+                                               int sourceSampleRate) const
 {
-    if (sample.sampleRate == hostSampleRate_ || sample.data.empty() || sample.sampleRate <= 0)
-        return;
+    SharedPcm pcm;
 
-    // double, not float: the same ratio also rescales the loop points below,
-    // and float phase accumulates audible error over long samples.
-    const double ratio = static_cast<double>(hostSampleRate_) / static_cast<double>(sample.sampleRate);
-    const auto newSize = static_cast<std::size_t>(static_cast<double>(sample.data.size()) * ratio);
+    std::vector<float> converted = convertPcmRange(sampleData, start, end);
+
+    if (converted.empty() || sourceSampleRate <= 0 || sourceSampleRate == hostSampleRate_)
+    {
+        pcm.data = std::make_shared<const std::vector<float>>(std::move(converted));
+        return pcm;
+    }
+
+    // double, not float: the same ratio also rescales each region's loop
+    // points, and float phase accumulates audible error over long samples.
+    const double ratio = static_cast<double>(hostSampleRate_) / static_cast<double>(sourceSampleRate);
+    const auto newSize = static_cast<std::size_t>(static_cast<double>(converted.size()) * ratio);
     if (newSize == 0)
-        return;
+    {
+        pcm.data = std::make_shared<const std::vector<float>>(std::move(converted));
+        return pcm;
+    }
 
     std::vector<float> resampled(newSize);
 
@@ -153,35 +199,23 @@ void SF2Loader::resampleToHostRate(Sample& sample)
         const double phase = static_cast<double>(i) / ratio;
         const auto index = static_cast<std::size_t>(phase);
 
-        if (index >= sample.data.size() - 1)
+        if (index >= converted.size() - 1)
         {
-            resampled[i] = sample.data.back();
+            resampled[i] = converted.back();
         }
         else
         {
             const auto frac = static_cast<float>(phase - static_cast<double>(index));
-            const float s0 = sample.data[index];
-            const float s1 = sample.data[index + 1];
+            const float s0 = converted[index];
+            const float s1 = converted[index + 1];
             resampled[i] = s0 + frac * (s1 - s0);
         }
     }
 
-    // Loop points are frame indices into data, so they live in the source
-    // rate too and must move with the resampled frames. Left unscaled, a
-    // 22.05 kHz sample on a 48 kHz host looped over the first ~46 % of the
-    // intended region: wrong pitch, wrong timbre, and clicks at the wrap.
-    // (Start/end offsets are already baked into data by convertPcmRange(),
-    // so loopStart/loopEnd are the only frame positions left to convert.)
-    const auto maxFrame = static_cast<std::int64_t>(newSize) - 1;
-    auto rescale = [ratio] (int frame) noexcept
-    {
-        return static_cast<std::int64_t>(std::llround(static_cast<double>(frame) * ratio));
-    };
-    sample.loopEnd = static_cast<int>(std::clamp<std::int64_t>(rescale(sample.loopEnd), 0, std::max<std::int64_t>(maxFrame, 0)));
-    sample.loopStart = static_cast<int>(std::clamp<std::int64_t>(rescale(sample.loopStart), 0, std::max<std::int64_t>(maxFrame - 1, 0)));
-
-    sample.data = std::move(resampled);
-    sample.sampleRate = hostSampleRate_;
+    pcm.data = std::make_shared<const std::vector<float>>(std::move(resampled));
+    pcm.resampleRatio = ratio;
+    pcm.resampled = true;
+    return pcm;
 }
 
 } // namespace aod

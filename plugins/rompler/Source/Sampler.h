@@ -14,7 +14,12 @@ namespace aod
 
 struct Sample
 {
-    std::vector<float> data;
+    // Shared, because a General MIDI bank splits most recordings across many
+    // regions by key or velocity zone. Those regions resolve to the same raw
+    // PCM range, and each used to get its own converted-and-resampled copy.
+    // const so a shared buffer can never be written through one region and
+    // change what another region plays.
+    std::shared_ptr<const std::vector<float>> data;
     int sampleRate = 48000;
     int loopStart = 0;
     int loopEnd = 0;

@@ -152,7 +152,7 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
     const auto [bank, program] = loader.firstPresetProgram();
     aod::Sample* sample = loader.getSample (bank, program, 60, 100);
     REQUIRE (sample != nullptr);
-    REQUIRE (! sample->data.empty());
+    REQUIRE (! sample->data->empty());
 }
 
 TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][m1]")
@@ -254,7 +254,7 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
             break;
     }
     REQUIRE (sample != nullptr);
-    REQUIRE (! sample->data.empty());
+    REQUIRE (! sample->data->empty());
 
     // A note 12 semitones above the root must advance exactly twice as fast
     // (2^(12/12) = 2) when the region uses normal chromatic tuning.
@@ -344,10 +344,10 @@ TEST_CASE ("loop points follow the sample when it is resampled to the host rate"
 
         // The frames at the loop points still carry the source frames' values:
         // the loop covers the same audio, not a different stretch of it.
-        REQUIRE (sample->loopEnd < static_cast<int> (sample->data.size()));
-        CHECK (std::abs (sample->data[static_cast<std::size_t> (sample->loopStart)]
+        REQUIRE (sample->loopEnd < static_cast<int> (sample->data->size()));
+        CHECK (std::abs ((*sample->data)[static_cast<std::size_t> (sample->loopStart)]
                          - static_cast<float> (loopStart) * sourceStep) <= sourceStep);
-        CHECK (std::abs (sample->data[static_cast<std::size_t> (sample->loopEnd)]
+        CHECK (std::abs ((*sample->data)[static_cast<std::size_t> (sample->loopEnd)]
                          - static_cast<float> (loopEnd) * sourceStep) <= sourceStep);
     }
 }
@@ -643,4 +643,56 @@ TEST_CASE ("repeated SoundFont loads while running do not pile up retired loader
 
     processor.releaseResources();
     CHECK (processor.getRetiredLoaderCount() == 0);
+}
+
+TEST_CASE ("regions that play the same recording share one PCM buffer", "[sf2][memory]")
+{
+    // One instrument, two key zones, both pointing at sample 0. A General MIDI
+    // bank splits its recordings this way constantly — 16,912 regions over
+    // 1,418 distinct ranges on FluidR3_GM — and each zone used to get its own
+    // converted-and-resampled copy of the same audio.
+    using namespace x10::sf2::test;
+
+    Sf2Builder builder;
+    builder.sampleFrames = 4096;
+
+    BuilderPreset preset;
+    preset.name = "Split";
+    preset.zones.push_back (BuilderZone { { { 41, 0 } } });   // instrument 0
+    builder.presets.push_back (preset);
+
+    BuilderInstrument instrument;
+    instrument.name = "Split";
+    instrument.zones.push_back (BuilderZone { { { 43, rangeAmount (0, 59) }, { 53, 0 } } });
+    instrument.zones.push_back (BuilderZone { { { 43, rangeAmount (60, 127) }, { 53, 0 } } });
+    builder.instruments.push_back (instrument);
+
+    BuilderSample sample;
+    sample.start      = 0;
+    sample.end        = 4096;
+    sample.loopStart  = 8;
+    sample.loopEnd    = 4000;
+    sample.sampleRate = 22050;   // differs from the host rate, so the resample path runs
+    builder.samples.push_back (sample);
+
+    const auto bytes = builder.build();
+    juce::TemporaryFile file (".sf2");
+    REQUIRE (file.getFile().replaceWithData (bytes.data(), bytes.size()));
+
+    aod::SF2Loader loader (48000);
+    REQUIRE (loader.loadFile (file.getFile()));
+
+    aod::Sample* low  = loader.getSample (0, 0, 30, 100);
+    aod::Sample* high = loader.getSample (0, 0, 90, 100);
+    REQUIRE (low != nullptr);
+    REQUIRE (high != nullptr);
+    REQUIRE (low != high);
+
+    // Two regions, one recording: the same buffer, not two copies of it.
+    CHECK (low->data.get() == high->data.get());
+    CHECK (low->data.use_count() >= 2);
+
+    // Sharing the audio must not share the per-region fields.
+    CHECK (low->loopStart == high->loopStart);
+    CHECK (low->sampleRate == 48000);
 }

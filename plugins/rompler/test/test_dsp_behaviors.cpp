@@ -17,10 +17,12 @@ aod::Sample makeTone()
 {
     aod::Sample s;
     constexpr int length = kSampleRate; // 1 second at 48k
-    s.data.resize (static_cast<std::size_t> (length));
+    std::vector<float> pcm (static_cast<std::size_t> (length));
     for (int i = 0; i < length; ++i)
-        s.data[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f * static_cast<float> (i)
-                                                         / static_cast<float> (kSampleRate));
+        pcm[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f * static_cast<float> (i)
+                                                      / static_cast<float> (kSampleRate));
+    // Sample::data is shared and const: build a private buffer, then hand it over.
+    s.data = std::make_shared<const std::vector<float>> (std::move (pcm));
     s.sampleRate = kSampleRate;
     return s;
 }
@@ -199,7 +201,7 @@ TEST_CASE ("a looping sample keeps sounding past its end", "[dsp][voice][loop]")
     // off the end and go silent within the first second of playback; a looping
     // voice must still be sounding well past that.
     sample.loopStart   = 0;
-    sample.loopEnd     = static_cast<int> (sample.data.size()) - 1;
+    sample.loopEnd     = static_cast<int> (sample.data->size()) - 1;
     sample.loopEnabled = true;
 
     aod::VoicePool pool;
@@ -244,7 +246,7 @@ TEST_CASE ("release on a looping sample fades out instead of restarting the loop
 {
     aod::Sample sample = makeTone();
     sample.loopStart   = 0;
-    sample.loopEnd     = static_cast<int> (sample.data.size()) - 1;
+    sample.loopEnd     = static_cast<int> (sample.data->size()) - 1;
     sample.loopEnabled = true;
 
     aod::VoicePool pool;
@@ -284,11 +286,12 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     // Very short sample: release starts after the tone has nearly ended, so the
     // old code path would cut the voice off at the buffer end and click.
     constexpr int length = 128;
-    sample.data.resize (static_cast<std::size_t> (length));
+    std::vector<float> pcm (static_cast<std::size_t> (length));
     for (int i = 0; i < length; ++i)
-        sample.data[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f
-                                                             * static_cast<float> (i)
-                                                             / static_cast<float> (kSampleRate));
+        pcm[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f
+                                                      * static_cast<float> (i)
+                                                      / static_cast<float> (kSampleRate));
+    sample.data = std::make_shared<const std::vector<float>> (std::move (pcm));
     sample.sampleRate = kSampleRate;
 
     aod::VoicePool pool;
@@ -364,7 +367,7 @@ namespace
 aod::Sample makeDc (int length, float value)
 {
     aod::Sample s;
-    s.data.assign (static_cast<std::size_t> (length), value);
+    s.data = std::make_shared<const std::vector<float>> (static_cast<std::size_t> (length), value);
     s.sampleRate = kSampleRate;
     return s;
 }
@@ -501,9 +504,10 @@ void requireBoundedLoopPlayback (const aod::Sample& sample, int note)
 aod::Sample makeShortLoop (int length, int loopStart, int loopEnd)
 {
     aod::Sample s;
-    s.data.resize (static_cast<std::size_t> (length));
+    std::vector<float> pcm (static_cast<std::size_t> (length));
     for (int i = 0; i < length; ++i)
-        s.data[static_cast<std::size_t> (i)] = 0.5f * std::sin (0.1f * static_cast<float> (i));
+        pcm[static_cast<std::size_t> (i)] = 0.5f * std::sin (0.1f * static_cast<float> (i));
+    s.data = std::make_shared<const std::vector<float>> (std::move (pcm));
     s.sampleRate  = kSampleRate;
     s.loopStart   = loopStart;
     s.loopEnd     = loopEnd;
