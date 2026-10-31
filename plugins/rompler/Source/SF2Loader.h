@@ -5,7 +5,9 @@
 #include <x10/sf2/Sf2Flattener.h>
 #include <x10/instrument/RegionIndex.h>
 #include <juce_core/juce_core.h>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -38,7 +40,29 @@ private:
     std::unique_ptr<x10::instrument::RegionIndex> regionIndex_;
     std::unordered_map<const x10::instrument::Region*, Sample> samples_;
 
-    void resampleToHostRate(Sample& sample);
+    /** One converted-and-resampled buffer, shared by every region whose
+        [start, end) names the same raw PCM range at the same source rate.
+        Regions split a recording by key or velocity far more often than they
+        need a private copy of it. */
+    struct SharedPcm
+    {
+        std::shared_ptr<const std::vector<float>> data;
+        // hostSampleRate_ / region.sampleRateHz for this buffer, needed to
+        // rescale each region's own loop points into resampled-frame indices.
+        // Stays 1.0 when `resampled` is false, and is never compared against
+        // in that case.
+        double resampleRatio = 1.0;
+        bool resampled = false;
+    };
+
+    /** Converts one raw PCM range to float and, when the source rate differs
+        from the host rate, resamples it. Pure function of its arguments: two
+        regions naming the same start/end at the same source rate always
+        produce the same buffer, which is what makes the cache in loadFile()
+        correct rather than merely convenient. */
+    [[nodiscard]] SharedPcm buildSharedPcm(std::span<const std::byte> sampleData,
+                                           std::uint32_t start, std::uint32_t end,
+                                           int sourceSampleRate) const;
 };
 
 } // namespace aod

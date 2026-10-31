@@ -77,7 +77,7 @@ float Voice::envelope() const noexcept
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveAmount, float velToDrive,
                     int curveId, int filterRouting, float filterOffsetCents) noexcept
 {
-    if (!active_ || sample_ == nullptr || sample_->data.empty())
+    if (!active_ || sample_ == nullptr || sample_->data == nullptr || sample_->data->empty())
         return;
 
     if (filterNeedsPrepare_ || filterSampleRate_ != hostSampleRate)
@@ -93,8 +93,8 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
     filter_.setCutoff (cutoffHz, q);
 
-    const float* sampleData = sample_->data.data();
-    const auto sampleCount = static_cast<std::int64_t>(sample_->data.size());
+    const float* sampleData = sample_->data->data();
+    const auto sampleCount = static_cast<std::int64_t>(sample_->data->size());
     const double invHostSampleRate = 1.0 / static_cast<double>(hostSampleRate);
 
     // Drive stage (see the mapping documented on Voice::render in Sampler.h).
