@@ -13,28 +13,34 @@
 namespace aod
 {
 
-// Shared synth-deck palette, sampled from the design mockup.
+// Restrained studio palette: sumi ink chassis, warm hanji panels, celadon jade
+// indicators, and cinnabar lacquer reserved for drive shaping and the maker's seal.
 namespace theme
 {
-    inline juce::Colour body         { 0xff232622 };
-    inline juce::Colour body2        { 0xff171916 };
-    inline juce::Colour bodyEdge     { 0xff34382f };
-    inline juce::Colour panel        { 0xffded7bd };
-    inline juce::Colour panelEdge    { 0xffb6ae8f };
-    inline juce::Colour ink          { 0xff221f1a };
-    inline juce::Colour inkSoft      { 0xff56503f };
-    inline juce::Colour mint         { 0xff7fe0c4 };
-    inline juce::Colour mintDeep     { 0xff34a984 };
-    inline juce::Colour mintGlow     { 0xff7fe0c4 };
-    inline juce::Colour hot          { 0xffff9452 };
-    inline juce::Colour hotDeep      { 0xffc96324 };
-    inline juce::Colour knobCream    { 0xfff2ecd8 };
-    inline juce::Colour knobShadow   { 0xffb7ae8e };
-    inline juce::Colour ledRed       { 0xffff4d3d };
-    inline juce::Colour ledHot       { 0xffffb454 };
-    inline juce::Colour ledMint      { 0xff7fe0c4 };
-    inline juce::Colour ledOff       { 0xff2a2e28 };
-    inline juce::Colour displayBg    { 0xff0e1613 };
+    inline juce::Colour body          { 0xff181a18 };
+    inline juce::Colour body2         { 0xff121412 };
+    inline juce::Colour bodyEdge      { 0xff2c302a };
+    inline juce::Colour chassisRule   { 0xff363b33 };
+    inline juce::Colour panel         { 0xffded7c4 };
+    inline juce::Colour panelSubtle   { 0xffd0c8b2 };
+    inline juce::Colour panelEdge     { 0xffa69e89 };
+    inline juce::Colour panelRule     { 0xffbeb6a0 };
+    inline juce::Colour ink           { 0xff1f1d19 };
+    inline juce::Colour inkSoft       { 0xff5e584a };
+    inline juce::Colour inkMuted      { 0xff858074 };
+    inline juce::Colour inkLight      { 0xffebe5d5 };
+    inline juce::Colour jade          { 0xff84b8a3 };
+    inline juce::Colour jadeDeep      { 0xff4b7c6a };
+    inline juce::Colour jadeWash      { 0xff1b2b25 };
+    inline juce::Colour cinnabar      { 0xffc66a43 };
+    inline juce::Colour cinnabarDeep  { 0xff914628 };
+    inline juce::Colour sealRed       { 0xffa83e32 };
+    inline juce::Colour knobCap       { 0xfff3eee0 };
+    inline juce::Colour knobShadow    { 0xffc6beaa };
+    inline juce::Colour ledOff        { 0xff222723 };
+    inline juce::Colour displayBg     { 0xff0f1512 };
+    inline juce::Colour displayEdge   { 0xff27332d };
+    inline juce::Colour keyFelt       { 0xff6e2c24 };
 }
 
 // Build a font at a given point height, optionally bold.
@@ -45,19 +51,23 @@ inline juce::Font makeFont (float pt, bool bold)
 }
 
 /**
-    A mint-outlined cream panel with a tab label in its top edge, like the
-    microKORG-style function boxes in the design mockup. Child controls are
-    laid out by the owning editor; this class just draws the box.
+    A warm hanji-stone panel with an integrated hairline header bar.
+    Child controls are laid out by the owning editor.
 */
 class SectionBox final : public juce::Component
 {
 public:
-    explicit SectionBox (const juce::String& title);
+    explicit SectionBox (const juce::String& title,
+                         const juce::String& subtitle = {},
+                         bool splitMid = false);
     ~SectionBox() override;
     void paint (juce::Graphics&) override;
+    void resized() override;
 
 private:
     juce::Label title_;
+    juce::Label subtitle_;
+    bool splitMid_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SectionBox)
 };
@@ -73,7 +83,7 @@ class Knob final : public juce::Component,
                    private juce::AsyncUpdater
 {
 public:
-    explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
+    explicit Knob (juce::RangedAudioParameter& param, bool hot = false, bool bipolar = false);
     ~Knob() override;
 
     /** Optionally override the printed name with an explicit UI label. */
@@ -84,6 +94,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
     /** Called (synchronously, possibly from the audio thread) when the bound
@@ -103,13 +114,13 @@ private:
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
     float lastDragY_ = 0.0f;
     bool hot_ = false;
+    bool bipolar_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Knob)
 };
 
 /**
-    A labelled segmented button group for choice parameters, like the CURVE
-    and OVERSAMPLE switches in the mockup. Drives an AudioParameterChoice via
+    A labelled segmented selector for choice parameters. Drives an AudioParameterChoice via
     a ComboBoxParameterAttachment backed by a hidden combo box.
 */
 class Switch final : public juce::Component
@@ -124,7 +135,6 @@ public:
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
-    void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
@@ -135,15 +145,13 @@ private:
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
     juce::Rectangle<int> pill_;
-    float lastDragY_ = 0.0f;
     bool leds_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Switch)
 };
 
 /**
-    A 2-way toggle switch, like the FILTER ROUTE Pre/Post switch in the
-    mockup. Drives an AudioParameterChoice with exactly two choices.
+    A 2-way segmented rocker for binary choice parameters (Pre / Post).
 */
 class Toggle final : public juce::Component
 {
@@ -162,13 +170,13 @@ private:
     juce::Label label_;
     juce::ComboBox box_;
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
+    juce::Rectangle<int> pill_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Toggle)
 };
 
 /**
-    A numeric stepper with up/down arrows and an LED digit readout, like the
-    POLYPHONY control in the mockup. Drives an AudioParameterInt via a
+    A numeric stepper with -/+ zones and a dark readout. Drives an AudioParameterInt via a
     SliderParameterAttachment backed by a hidden slider.
 */
 class Stepper final : public juce::Component,
@@ -186,6 +194,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
     /** Called (synchronously, possibly from the audio thread) when the bound
@@ -201,12 +210,14 @@ private:
     juce::Label label_;
     juce::Slider slider_;
     std::unique_ptr<juce::SliderParameterAttachment> attachment_;
+    juce::Rectangle<int> readoutRect_;
     float lastDragY_ = 0.0f;
+    bool dragged_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Stepper)
 };
 
-/** A column of LED segments that light up with the output peak level. */
+/** A compact segmented meter showing live output peak level. */
 class PeakMeter final : public juce::Component
 {
 public:
@@ -215,10 +226,13 @@ public:
 
     void setLevel (float level);   // 0..1
     void paint (juce::Graphics&) override;
+    void resized() override;
 
 private:
     static constexpr int numSegments = 8;
     float level_ = 0.0f;
+    juce::Label label_;
+    juce::Rectangle<int> barRect_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PeakMeter)
 };
@@ -240,6 +254,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
 
     void setKeyRange (int lowNote, int numKeys);
@@ -253,6 +268,7 @@ private:
     std::vector<PianoKey> keys_;
     int numWhite_ = 0;
     juce::HashMap<int, bool> lit_;
+    int activeMouseNote_ = -1;
     std::function<void (int, bool)> noteCallback_;   // set by the editor -> postNote
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Keyboard)
@@ -327,6 +343,7 @@ private:
     SectionBox voiceBox_;
     SectionBox busBox_;
     SectionBox fxBox_;
+    juce::Rectangle<int> libraryRect_;
 
     // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10), FX (11-16).
     std::array<std::unique_ptr<juce::Component>, 17> controls_;
@@ -340,10 +357,13 @@ private:
     std::unique_ptr<BankBrowser> bankBrowser_;
     Keyboard keyboard_;
 
+    std::unique_ptr<juce::LookAndFeel> lnf_;
     std::unique_ptr<juce::FileChooser> fileChooser_;
+    juce::String lastLoadedFile_;
 
     void refreshDisplay();
     void refreshPresetList();
+    void updateBankDigits();
     void onLoadButtonClicked();
     void layoutVoiceControls (juce::Rectangle<int> area);
     void layoutBusControls (juce::Rectangle<int> area);
